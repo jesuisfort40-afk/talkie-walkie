@@ -4,18 +4,13 @@ plugins {
 
 android {
     namespace 'com.talkiewalkie.app'
-    compileSdk 34
+    compileSdkVersion 34
     defaultConfig {
         applicationId "com.talkiewalkie.app"
-        minSdk 21
-        targetSdk 34
+        minSdkVersion 21
+        targetSdkVersion 34
         versionCode 1
         versionName "1.0"
-    }
-    buildTypes {
-        debug {
-            minifyEnabled false
-        }
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
