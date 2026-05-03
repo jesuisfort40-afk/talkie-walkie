@@ -1,7 +1,6 @@
 package com.talkiewalkie.app;
 
 import android.Manifest;
-import android.content.pm.PackageManager;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioRecord;
@@ -15,7 +14,6 @@ import android.view.View;
 import android.widget.*;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
 
 import java.io.*;
 import java.net.*;
@@ -23,46 +21,31 @@ import java.util.*;
 
 public class MainActivity extends AppCompatActivity {
 
-    // Audio config
     private static final int SAMPLE_RATE = 16000;
     private static final int CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO;
     private static final int CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO;
     private static final int ENCODING = AudioFormat.ENCODING_PCM_16BIT;
     private static final int BUFFER_SIZE = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, ENCODING) * 2;
-
-    // Network
     private static final int PORT = 55555;
 
-    // UI
     private Button btnPush;
-    private TextView tvStatus, tvMode, tvPeers;
+    private TextView tvStatus, tvMode, tvPeers, tvMyIp;
     private RadioGroup rgMode;
-    private EditText etServerIp, etRoomCode;
+    private EditText etTargetIp, etDirectIp, etServerIp, etRoomCode;
     private LinearLayout layoutWifi, layoutDirect, layoutInternet;
 
-    // Audio
     private AudioRecord audioRecord;
     private AudioTrack audioTrack;
     private boolean isSending = false;
-    private boolean isReceiving = false;
-
-    // Network
     private ServerSocket serverSocket;
-    private Socket sendSocket;
-    private Thread receiveThread, sendThread, serverThread;
+    private Thread serverThread;
     private String currentMode = "WIFI";
-
-    // Internet relay (simple UDP broadcast simulation via TCP relay)
-    private String serverRelayIp = "";
-    private String roomCode = "";
-
     private Handler mainHandler = new Handler(Looper.getMainLooper());
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-
         initViews();
         requestPermissions();
         setupModeSelector();
@@ -75,15 +58,15 @@ public class MainActivity extends AppCompatActivity {
         tvStatus = findViewById(R.id.tvStatus);
         tvMode = findViewById(R.id.tvMode);
         tvPeers = findViewById(R.id.tvPeers);
+        tvMyIp = findViewById(R.id.tvMyIp);
         rgMode = findViewById(R.id.rgMode);
+        etTargetIp = findViewById(R.id.etTargetIp);
+        etDirectIp = findViewById(R.id.etDirectIp);
         etServerIp = findViewById(R.id.etServerIp);
         etRoomCode = findViewById(R.id.etRoomCode);
         layoutWifi = findViewById(R.id.layoutWifi);
         layoutDirect = findViewById(R.id.layoutDirect);
         layoutInternet = findViewById(R.id.layoutInternet);
-
-        // Show local IP
-        TextView tvMyIp = findViewById(R.id.tvMyIp);
         tvMyIp.setText("Mon IP : " + getLocalIp());
     }
 
@@ -92,7 +75,6 @@ public class MainActivity extends AppCompatActivity {
             layoutWifi.setVisibility(View.GONE);
             layoutDirect.setVisibility(View.GONE);
             layoutInternet.setVisibility(View.GONE);
-
             if (checkedId == R.id.rbWifi) {
                 currentMode = "WIFI";
                 layoutWifi.setVisibility(View.VISIBLE);
@@ -102,17 +84,14 @@ public class MainActivity extends AppCompatActivity {
                 currentMode = "DIRECT";
                 layoutDirect.setVisibility(View.VISIBLE);
                 tvMode.setText("MODE : WiFi Direct (~200m)");
-                updateStatus("Activez WiFi Direct dans les paramètres");
-                startWifiDirectDiscovery();
+                updateStatus("Connectez via WiFi Direct dans paramètres");
             } else if (checkedId == R.id.rbInternet) {
                 currentMode = "INTERNET";
                 layoutInternet.setVisibility(View.VISIBLE);
                 tvMode.setText("MODE : Internet (illimité)");
-                updateStatus("Entrez IP serveur et code salle");
+                updateStatus("Entrez le code salle");
             }
         });
-
-        // Default mode
         rgMode.check(R.id.rbWifi);
     }
 
@@ -135,31 +114,37 @@ public class MainActivity extends AppCompatActivity {
         if (isSending) return;
         isSending = true;
 
-        String targetIp = getTargetIp();
+        if (currentMode.equals("INTERNET")) {
+            startSendingInternet();
+        } else {
+            startSendingLocal();
+        }
+    }
+
+    private void startSendingLocal() {
+        String targetIp = currentMode.equals("WIFI") ?
+            etTargetIp.getText().toString().trim() :
+            etDirectIp.getText().toString().trim();
+
         if (targetIp.isEmpty()) {
-            updateStatus("❌ Entrez l'IP de destination !");
+            updateStatus("❌ Entrez l'IP !");
             isSending = false;
             return;
         }
 
-        sendThread = new Thread(() -> {
+        new Thread(() -> {
             try {
-                audioRecord = new AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    SAMPLE_RATE, CHANNEL_IN, ENCODING, BUFFER_SIZE
-                );
+                audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC,
+                    SAMPLE_RATE, CHANNEL_IN, ENCODING, BUFFER_SIZE);
                 audioRecord.startRecording();
 
                 Socket socket = new Socket();
                 socket.connect(new InetSocketAddress(targetIp, PORT), 2000);
-                OutputStream out = socket.getOutputStream();
-                DataOutputStream dos = new DataOutputStream(out);
-
-                // Send room code for internet mode
-                dos.writeUTF(currentMode.equals("INTERNET") ? roomCode : "LOCAL");
+                DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
+                dos.writeUTF("LOCAL");
 
                 byte[] buffer = new byte[BUFFER_SIZE];
-                mainHandler.post(() -> updateStatus("📡 Transmission en cours..."));
+                mainHandler.post(() -> updateStatus("📡 Transmission..."));
 
                 while (isSending) {
                     int read = audioRecord.read(buffer, 0, buffer.length);
@@ -170,22 +155,60 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
 
-                dos.writeInt(-1); // Signal fin
+                dos.writeInt(-1);
                 socket.close();
                 audioRecord.stop();
                 audioRecord.release();
                 mainHandler.post(() -> updateStatus("✅ Prêt"));
 
             } catch (Exception e) {
-                mainHandler.post(() -> updateStatus("❌ Erreur : " + e.getMessage()));
+                mainHandler.post(() -> updateStatus("❌ " + e.getMessage()));
                 isSending = false;
             }
-        });
-        sendThread.start();
+        }).start();
     }
 
-    private void stopSending() {
-        isSending = false;
+    private void startSendingInternet() {
+        String room = etRoomCode.getText().toString().trim();
+        if (room.isEmpty()) {
+            updateStatus("❌ Entrez le code salle !");
+            isSending = false;
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC,
+                    SAMPLE_RATE, CHANNEL_IN, ENCODING, BUFFER_SIZE);
+                audioRecord.startRecording();
+                mainHandler.post(() -> updateStatus("📡 Transmission internet..."));
+
+                byte[] buffer = new byte[BUFFER_SIZE];
+                while (isSending) {
+                    int read = audioRecord.read(buffer, 0, buffer.length);
+                    if (read > 0) {
+                        byte[] data = Arrays.copyOf(buffer, read);
+                        URL url = new URL("https://talkie-walkie-production.up.railway.app/send?room=" + room);
+                        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                        conn.setRequestMethod("POST");
+                        conn.setDoOutput(true);
+                        conn.setConnectTimeout(3000);
+                        conn.getOutputStream().write(data);
+                        conn.getOutputStream().flush();
+                        conn.getResponseCode();
+                        conn.disconnect();
+                    }
+                }
+
+                audioRecord.stop();
+                audioRecord.release();
+                mainHandler.post(() -> updateStatus("✅ Prêt"));
+
+            } catch (Exception e) {
+                mainHandler.post(() -> updateStatus("❌ " + e.getMessage()));
+                isSending = false;
+            }
+        }).start();
     }
 
     private void startReceiveServer() {
@@ -193,19 +216,54 @@ public class MainActivity extends AppCompatActivity {
             try {
                 serverSocket = new ServerSocket(PORT);
                 mainHandler.post(() -> updateStatus("✅ Prêt à recevoir"));
-
                 while (!Thread.interrupted()) {
                     Socket client = serverSocket.accept();
                     new Thread(() -> handleIncoming(client)).start();
                 }
             } catch (Exception e) {
-                if (!e.getMessage().contains("closed")) {
+                if (e.getMessage() != null && !e.getMessage().contains("closed")) {
                     mainHandler.post(() -> updateStatus("Serveur: " + e.getMessage()));
                 }
             }
         });
         serverThread.setDaemon(true);
         serverThread.start();
+
+        if (currentMode.equals("INTERNET")) {
+            startReceivingInternet();
+        }
+    }
+
+    private void startReceivingInternet() {
+        String room = etRoomCode.getText().toString().trim();
+        if (room.isEmpty()) return;
+
+        new Thread(() -> {
+            try {
+                URL url = new URL("https://talkie-walkie-production.up.railway.app/join?room=" + room);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setReadTimeout(0);
+                InputStream in = conn.getInputStream();
+
+                audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
+                    SAMPLE_RATE, CHANNEL_OUT, ENCODING, BUFFER_SIZE, AudioTrack.MODE_STREAM);
+                audioTrack.play();
+                mainHandler.post(() -> updateStatus("📻 En écoute internet..."));
+
+                byte[] buffer = new byte[BUFFER_SIZE];
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    audioTrack.write(buffer, 0, read);
+                }
+
+                audioTrack.stop();
+                audioTrack.release();
+
+            } catch (Exception e) {
+                mainHandler.post(() -> updateStatus("Réception: " + e.getMessage()));
+            }
+        }).start();
     }
 
     private void handleIncoming(Socket client) {
@@ -213,22 +271,13 @@ public class MainActivity extends AppCompatActivity {
             DataInputStream dis = new DataInputStream(client.getInputStream());
             String code = dis.readUTF();
 
-            // Filter by room code in internet mode
-            if (currentMode.equals("INTERNET") && !code.equals(roomCode) && !roomCode.isEmpty()) {
-                client.close();
-                return;
-            }
-
             mainHandler.post(() -> {
                 updateStatus("📻 Signal reçu !");
                 tvPeers.setText("Connecté : " + client.getInetAddress().getHostAddress());
             });
 
-            audioTrack = new AudioTrack(
-                AudioManager.STREAM_MUSIC,
-                SAMPLE_RATE, CHANNEL_OUT, ENCODING,
-                BUFFER_SIZE, AudioTrack.MODE_STREAM
-            );
+            audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
+                SAMPLE_RATE, CHANNEL_OUT, ENCODING, BUFFER_SIZE, AudioTrack.MODE_STREAM);
             audioTrack.play();
 
             byte[] buffer = new byte[BUFFER_SIZE];
@@ -248,27 +297,8 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void startWifiDirectDiscovery() {
-        // WiFi Direct uses the same socket mechanism
-        // User needs to connect via WiFi Direct first in Android Settings
-        // Then use the group owner IP (usually 192.168.49.1)
-        EditText etDirectIp = findViewById(R.id.etDirectIp);
-        etDirectIp.setHint("IP groupe (ex: 192.168.49.1)");
-        updateStatus("Connectez via WiFi Direct → paramètres Android\nIP groupe owner: 192.168.49.1");
-    }
-
-    private String getTargetIp() {
-        if (currentMode.equals("WIFI")) {
-            EditText etIp = findViewById(R.id.etTargetIp);
-            return etIp.getText().toString().trim();
-        } else if (currentMode.equals("DIRECT")) {
-            EditText etIp = findViewById(R.id.etDirectIp);
-            return etIp.getText().toString().trim();
-        } else {
-            serverRelayIp = etServerIp.getText().toString().trim();
-            roomCode = etRoomCode.getText().toString().trim();
-            return serverRelayIp;
-        }
+    private void stopSending() {
+        isSending = false;
     }
 
     private String getLocalIp() {
@@ -284,7 +314,7 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
             }
-        } catch (Exception e) { }
+        } catch (Exception e) {}
         return "Inconnu";
     }
 
@@ -293,15 +323,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void requestPermissions() {
-        String[] perms = {
+        ActivityCompat.requestPermissions(this, new String[]{
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.INTERNET,
             Manifest.permission.ACCESS_WIFI_STATE,
             Manifest.permission.CHANGE_WIFI_STATE,
             Manifest.permission.ACCESS_NETWORK_STATE,
             Manifest.permission.ACCESS_FINE_LOCATION
-        };
-        ActivityCompat.requestPermissions(this, perms, 1);
+        }, 1);
     }
 
     @Override
