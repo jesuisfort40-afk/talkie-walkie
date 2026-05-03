@@ -1,43 +1,49 @@
+import com.sun.net.httpserver.*;
 import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
 
 public class Server {
-    static final int PORT = 55555;
-    static Map<String, List<Socket>> rooms = new ConcurrentHashMap<>();
+    static Map<String, List<OutputStream>> rooms = new ConcurrentHashMap<>();
 
     public static void main(String[] args) throws Exception {
-        ServerSocket server = new ServerSocket(PORT);
-        System.out.println("Serveur démarré port " + PORT);
-
-        while (true) {
-            Socket client = server.accept();
-            new Thread(() -> handle(client)).start();
-        }
+        int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
+        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+        server.createContext("/join", Server::handleJoin);
+        server.createContext("/send", Server::handleSend);
+        server.setExecutor(Executors.newCachedThreadPool());
+        server.start();
+        System.out.println("Serveur HTTP démarré port " + port);
     }
 
-    static void handle(Socket client) {
-        try {
-            DataInputStream dis = new DataInputStream(client.getInputStream());
-            String room = dis.readUTF();
+    static void handleJoin(HttpExchange ex) throws IOException {
+        String room = ex.getRequestURI().getQuery().replace("room=", "");
+        ex.getResponseHeaders().add("Content-Type", "audio/pcm");
+        ex.getResponseHeaders().add("Transfer-Encoding", "chunked");
+        ex.sendResponseHeaders(200, 0);
+        rooms.computeIfAbsent(room, k -> Collections.synchronizedList(new ArrayList<>()))
+             .add(ex.getResponseBody());
+        System.out.println("Écouteur rejoint salle: " + room);
+    }
 
-            rooms.computeIfAbsent(room, k -> Collections.synchronizedList(new ArrayList<>())).add(client);
-            System.out.println("Client rejoint salle: " + room);
-
-            byte[] buf = new byte[4096];
-            int len;
-            while ((len = client.getInputStream().read(buf)) != -1) {
-                for (Socket peer : rooms.get(room)) {
-                    if (peer != client && !peer.isClosed()) {
-                        peer.getOutputStream().write(buf, 0, len);
-                        peer.getOutputStream().flush();
-                    }
+    static void handleSend(HttpExchange ex) throws IOException {
+        String room = ex.getRequestURI().getQuery().replace("room=", "");
+        byte[] data = ex.getRequestBody().readAllBytes();
+        List<OutputStream> listeners = rooms.getOrDefault(room, new ArrayList<>());
+        synchronized (listeners) {
+            Iterator<OutputStream> it = listeners.iterator();
+            while (it.hasNext()) {
+                try {
+                    OutputStream out = it.next();
+                    out.write(data);
+                    out.flush();
+                } catch (Exception e) {
+                    it.remove();
                 }
             }
-            rooms.get(room).remove(client);
-        } catch (Exception e) {
-            System.out.println("Client déconnecté");
         }
+        ex.sendResponseHeaders(200, 0);
+        ex.getResponseBody().close();
     }
 }
