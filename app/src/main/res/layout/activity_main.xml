@@ -10,7 +10,6 @@
         android:orientation="vertical"
         android:padding="20dp">
 
-        <!-- TITRE -->
         <TextView
             android:text="📡 TALKIE WALKIE"
             android:layout_width="match_parent"
@@ -22,7 +21,6 @@
             android:paddingTop="10dp"
             android:paddingBottom="5dp"/>
 
-        <!-- MON IP -->
         <TextView
             android:id="@+id/tvMyIp"
             android:layout_width="match_parent"
@@ -32,7 +30,6 @@
             android:gravity="center"
             android:paddingBottom="15dp"/>
 
-        <!-- MODE SELECTOR -->
         <TextView
             android:text="CHOISIR MODE"
             android:layout_width="match_parent"
@@ -118,14 +115,6 @@
             android:layout_marginBottom="10dp"
             android:visibility="gone">
 
-            <TextView
-                android:text="1. Allez dans Paramètres → WiFi Direct\n2. Connectez les 2 téléphones\n3. Entrez l'IP ci-dessous"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textColor="#AAAAAA"
-                android:textSize="12sp"
-                android:paddingBottom="10dp"/>
-
             <EditText
                 android:id="@+id/etDirectIp"
                 android:layout_width="match_parent"
@@ -150,10 +139,10 @@
             android:visibility="gone">
 
             <EditText
-                android:id="@+id/etServerIp"
+                android:id="@+id/etUsername"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="IP serveur relais"
+                android:hint="Votre pseudo"
                 android:textColor="#FFFFFF"
                 android:textColorHint="#555555"
                 android:background="#2A2A3E"
@@ -165,15 +154,73 @@
                 android:id="@+id/etRoomCode"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="Code salle (ex: ALPHA42)"
+                android:hint="Code salle (pour rejoindre)"
                 android:textColor="#FFFFFF"
                 android:textColorHint="#555555"
                 android:background="#2A2A3E"
                 android:padding="12dp"
-                android:inputType="text"/>
+                android:inputType="textCapCharacters"
+                android:layout_marginBottom="10dp"/>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnCreate"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="🏠 CRÉER"
+                    android:textColor="#FFFFFF"
+                    android:backgroundTint="#FF6600"
+                    android:layout_marginEnd="5dp"
+                    android:visibility="gone"/>
+
+                <Button
+                    android:id="@+id/btnJoin"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="🔗 REJOINDRE"
+                    android:textColor="#FFFFFF"
+                    android:backgroundTint="#9C27B0"
+                    android:layout_marginStart="5dp"
+                    android:visibility="gone"/>
+            </LinearLayout>
         </LinearLayout>
 
-        <!-- MODE LABEL -->
+        <!-- INFO SALLE -->
+        <LinearLayout
+            android:id="@+id/layoutRoom"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="#0D1F0D"
+            android:padding="15dp"
+            android:layout_marginBottom="10dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/tvRoom"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#00FF88"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:gravity="center"
+                android:paddingBottom="5dp"/>
+
+            <TextView
+                android:id="@+id/tvMembers"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#AAAAAA"
+                android:textSize="13sp"
+                android:gravity="center"/>
+        </LinearLayout>
+
         <TextView
             android:id="@+id/tvMode"
             android:layout_width="match_parent"
@@ -184,7 +231,6 @@
             android:gravity="center"
             android:paddingBottom="10dp"/>
 
-        <!-- STATUS -->
         <TextView
             android:id="@+id/tvStatus"
             android:layout_width="match_parent"
@@ -197,7 +243,6 @@
             android:padding="12dp"
             android:layout_marginBottom="10dp"/>
 
-        <!-- PEERS -->
         <TextView
             android:id="@+id/tvPeers"
             android:layout_width="match_parent"
@@ -208,7 +253,6 @@
             android:gravity="center"
             android:paddingBottom="20dp"/>
 
-        <!-- PUSH TO TALK BUTTON -->
         <Button
             android:id="@+id/btnPush"
             android:layout_width="match_parent"
@@ -218,20 +262,19 @@
             android:textStyle="bold"
             android:textColor="#FFFFFF"
             android:backgroundTint="#4CAF50"
-            android:layout_marginTop="10dp"
-            android:layout_marginBottom="30dp"/>
+            android:layout_marginBottom="10dp"/>
 
         <Button
-    android:id="@+id/btnListen"
-    android:layout_width="match_parent"
-    android:layout_height="80dp"
-    android:text="👂 ÉCOUTER"
-    android:textSize="18sp"
-    android:textStyle="bold"
-    android:textColor="#FFFFFF"
-    android:backgroundTint="#2196F3"
-    android:layout_marginBottom="30dp"
-    android:visibility="gone"/>
+            android:id="@+id/btnListen"
+            android:layout_width="match_parent"
+            android:layout_height="80dp"
+            android:text="👂 ÉCOUTER"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#2196F3"
+            android:layout_marginBottom="30dp"
+            android:visibility="gone"/>
 
     </LinearLayout>
 </ScrollView>
