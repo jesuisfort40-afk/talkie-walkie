@@ -27,12 +27,13 @@ public class MainActivity extends AppCompatActivity {
     private static final int ENCODING = AudioFormat.ENCODING_PCM_16BIT;
     private static final int BUFFER_SIZE = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, ENCODING) * 2;
     private static final int PORT = 55555;
+    private static final String SERVER = "https://talkie-walkie-production.up.railway.app";
 
-    private Button btnPush, btnListen;
-    private TextView tvStatus, tvMode, tvPeers, tvMyIp;
+    private Button btnPush, btnListen, btnCreate, btnJoin;
+    private TextView tvStatus, tvMode, tvPeers, tvMyIp, tvRoom, tvMembers;
     private RadioGroup rgMode;
-    private EditText etTargetIp, etDirectIp, etServerIp, etRoomCode;
-    private LinearLayout layoutWifi, layoutDirect, layoutInternet;
+    private EditText etTargetIp, etDirectIp, etRoomCode, etUsername;
+    private LinearLayout layoutWifi, layoutDirect, layoutInternet, layoutRoom;
 
     private AudioRecord audioRecord;
     private AudioTrack audioTrack;
@@ -41,7 +42,10 @@ public class MainActivity extends AppCompatActivity {
     private ServerSocket serverSocket;
     private Thread serverThread;
     private String currentMode = "WIFI";
+    private String currentRoom = "";
+    private String username = "";
     private Handler mainHandler = new Handler(Looper.getMainLooper());
+    private Timer membersTimer;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -57,18 +61,23 @@ public class MainActivity extends AppCompatActivity {
     private void initViews() {
         btnPush = findViewById(R.id.btnPush);
         btnListen = findViewById(R.id.btnListen);
+        btnCreate = findViewById(R.id.btnCreate);
+        btnJoin = findViewById(R.id.btnJoin);
         tvStatus = findViewById(R.id.tvStatus);
         tvMode = findViewById(R.id.tvMode);
         tvPeers = findViewById(R.id.tvPeers);
         tvMyIp = findViewById(R.id.tvMyIp);
+        tvRoom = findViewById(R.id.tvRoom);
+        tvMembers = findViewById(R.id.tvMembers);
         rgMode = findViewById(R.id.rgMode);
         etTargetIp = findViewById(R.id.etTargetIp);
         etDirectIp = findViewById(R.id.etDirectIp);
-        etServerIp = findViewById(R.id.etServerIp);
         etRoomCode = findViewById(R.id.etRoomCode);
+        etUsername = findViewById(R.id.etUsername);
         layoutWifi = findViewById(R.id.layoutWifi);
         layoutDirect = findViewById(R.id.layoutDirect);
         layoutInternet = findViewById(R.id.layoutInternet);
+        layoutRoom = findViewById(R.id.layoutRoom);
         tvMyIp.setText("Mon IP : " + getLocalIp());
     }
 
@@ -77,7 +86,11 @@ public class MainActivity extends AppCompatActivity {
             layoutWifi.setVisibility(View.GONE);
             layoutDirect.setVisibility(View.GONE);
             layoutInternet.setVisibility(View.GONE);
+            layoutRoom.setVisibility(View.GONE);
             btnListen.setVisibility(View.GONE);
+            btnCreate.setVisibility(View.GONE);
+            btnJoin.setVisibility(View.GONE);
+
             if (checkedId == R.id.rbWifi) {
                 currentMode = "WIFI";
                 layoutWifi.setVisibility(View.VISIBLE);
@@ -91,16 +104,16 @@ public class MainActivity extends AppCompatActivity {
             } else if (checkedId == R.id.rbInternet) {
                 currentMode = "INTERNET";
                 layoutInternet.setVisibility(View.VISIBLE);
-                btnListen.setVisibility(View.VISIBLE);
+                btnCreate.setVisibility(View.VISIBLE);
+                btnJoin.setVisibility(View.VISIBLE);
                 tvMode.setText("MODE : Internet (illimité)");
-                updateStatus("Entrez code salle et choisissez Parler ou Écouter");
+                updateStatus("Créez ou rejoignez une salle");
             }
         });
         rgMode.check(R.id.rbWifi);
     }
 
     private void setupButtons() {
-        // Bouton PARLER
         btnPush.setOnTouchListener((v, event) -> {
             if (event.getAction() == MotionEvent.ACTION_DOWN) {
                 startSending();
@@ -114,7 +127,6 @@ public class MainActivity extends AppCompatActivity {
             return true;
         });
 
-        // Bouton ÉCOUTER
         btnListen.setOnClickListener(v -> {
             if (!isListening) {
                 startListeningInternet();
@@ -126,6 +138,168 @@ public class MainActivity extends AppCompatActivity {
                 btnListen.setBackgroundColor(0xFF2196F3);
             }
         });
+
+        btnCreate.setOnClickListener(v -> {
+            username = etUsername.getText().toString().trim();
+            if (username.isEmpty()) {
+                updateStatus("❌ Entrez votre pseudo !");
+                return;
+            }
+            createRoom();
+        });
+
+        btnJoin.setOnClickListener(v -> {
+            username = etUsername.getText().toString().trim();
+            String room = etRoomCode.getText().toString().trim().toUpperCase();
+            if (username.isEmpty()) {
+                updateStatus("❌ Entrez votre pseudo !");
+                return;
+            }
+            if (room.isEmpty()) {
+                updateStatus("❌ Entrez le code salle !");
+                return;
+            }
+            joinRoom(room);
+        });
+    }
+
+    private void createRoom() {
+        new Thread(() -> {
+            try {
+                URL url = new URL(SERVER + "/create?user=" + URLEncoder.encode(username, "UTF-8"));
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(5000);
+
+                BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                String response = br.readLine();
+                conn.disconnect();
+
+                // Parse room code
+                String room = response.split("\"room\":\"")[1].split("\"")[0];
+                currentRoom = room;
+
+                mainHandler.post(() -> {
+                    tvRoom.setText("🏠 Salle : " + room + "\n(Partage ce code !)");
+                    layoutRoom.setVisibility(View.VISIBLE);
+                    btnListen.setVisibility(View.VISIBLE);
+                    btnCreate.setVisibility(View.GONE);
+                    btnJoin.setVisibility(View.GONE);
+                    updateStatus("✅ Salle " + room + " créée !");
+                });
+
+                startMembersRefresh();
+
+            } catch (Exception e) {
+                mainHandler.post(() -> updateStatus("❌ Erreur création: " + e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void joinRoom(String room) {
+        new Thread(() -> {
+            try {
+                URL url = new URL(SERVER + "/join?room=" + room + "&user=" + URLEncoder.encode(username, "UTF-8"));
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(0);
+
+                int code = conn.getResponseCode();
+                if (code == 404) {
+                    mainHandler.post(() -> updateStatus("❌ Salle introuvable !"));
+                    return;
+                }
+
+                currentRoom = room;
+                mainHandler.post(() -> {
+                    tvRoom.setText("🏠 Salle : " + room);
+                    layoutRoom.setVisibility(View.VISIBLE);
+                    btnListen.setVisibility(View.VISIBLE);
+                    btnCreate.setVisibility(View.GONE);
+                    btnJoin.setVisibility(View.GONE);
+                    updateStatus("✅ Connecté à la salle " + room);
+                    tvPeers.setText("Connecté ✅");
+                });
+
+                // Start receiving audio
+                audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
+                    SAMPLE_RATE, CHANNEL_OUT, ENCODING, BUFFER_SIZE, AudioTrack.MODE_STREAM);
+                audioTrack.play();
+                isListening = true;
+                mainHandler.post(() -> {
+                    btnListen.setText("🔴 ÉCOUTE EN COURS...");
+                    btnListen.setBackgroundColor(0xFFFF4444);
+                });
+
+                InputStream in = conn.getInputStream();
+                byte[] buffer = new byte[BUFFER_SIZE];
+                int read;
+                while (isListening && (read = in.read(buffer)) != -1) {
+                    audioTrack.write(buffer, 0, read);
+                }
+
+                audioTrack.stop();
+                audioTrack.release();
+                startMembersRefresh();
+
+            } catch (Exception e) {
+                mainHandler.post(() -> updateStatus("❌ " + e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void startMembersRefresh() {
+        membersTimer = new Timer();
+        membersTimer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                try {
+                    URL url = new URL(SERVER + "/members?room=" + currentRoom);
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setConnectTimeout(3000);
+                    BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                    String response = br.readLine();
+                    conn.disconnect();
+                    String count = response.split("\"count\":")[1].replace("}", "").trim();
+                    mainHandler.post(() -> tvMembers.setText("👥 " + count + " membre(s) connecté(s)"));
+                } catch (Exception e) {}
+            }
+        }, 0, 3000);
+    }
+
+    private void startListeningInternet() {
+        if (currentRoom.isEmpty()) {
+            updateStatus("❌ Créez ou rejoignez une salle d'abord !");
+            return;
+        }
+        isListening = true;
+        new Thread(() -> {
+            try {
+                URL url = new URL(SERVER + "/join?room=" + currentRoom + "&user=" + URLEncoder.encode(username, "UTF-8"));
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setReadTimeout(0);
+                InputStream in = conn.getInputStream();
+
+                audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
+                    SAMPLE_RATE, CHANNEL_OUT, ENCODING, BUFFER_SIZE, AudioTrack.MODE_STREAM);
+                audioTrack.play();
+                mainHandler.post(() -> updateStatus("👂 Écoute en cours..."));
+
+                byte[] buffer = new byte[BUFFER_SIZE];
+                int read;
+                while (isListening && (read = in.read(buffer)) != -1) {
+                    audioTrack.write(buffer, 0, read);
+                }
+
+                audioTrack.stop();
+                audioTrack.release();
+
+            } catch (Exception e) {
+                mainHandler.post(() -> updateStatus("❌ " + e.getMessage()));
+                isListening = false;
+            }
+        }).start();
     }
 
     private void startSending() {
@@ -186,9 +360,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startSendingInternet() {
-        String room = etRoomCode.getText().toString().trim();
-        if (room.isEmpty()) {
-            updateStatus("❌ Entrez le code salle !");
+        if (currentRoom.isEmpty()) {
+            updateStatus("❌ Créez ou rejoignez une salle d'abord !");
             isSending = false;
             return;
         }
@@ -198,14 +371,14 @@ public class MainActivity extends AppCompatActivity {
                 audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC,
                     SAMPLE_RATE, CHANNEL_IN, ENCODING, BUFFER_SIZE);
                 audioRecord.startRecording();
-                mainHandler.post(() -> updateStatus("📡 Transmission internet..."));
+                mainHandler.post(() -> updateStatus("📡 Transmission..."));
 
                 byte[] buffer = new byte[BUFFER_SIZE];
                 while (isSending) {
                     int read = audioRecord.read(buffer, 0, buffer.length);
                     if (read > 0) {
                         byte[] data = Arrays.copyOf(buffer, read);
-                        URL url = new URL("https://talkie-walkie-production.up.railway.app/send?room=" + room);
+                        URL url = new URL(SERVER + "/send?room=" + currentRoom);
                         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                         conn.setRequestMethod("POST");
                         conn.setDoOutput(true);
@@ -224,44 +397,6 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception e) {
                 mainHandler.post(() -> updateStatus("❌ " + e.getMessage()));
                 isSending = false;
-            }
-        }).start();
-    }
-
-    private void startListeningInternet() {
-        String room = etRoomCode.getText().toString().trim();
-        if (room.isEmpty()) {
-            updateStatus("❌ Entrez le code salle !");
-            return;
-        }
-        isListening = true;
-
-        new Thread(() -> {
-            try {
-                URL url = new URL("https://talkie-walkie-production.up.railway.app/join?room=" + room);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.setReadTimeout(0);
-                InputStream in = conn.getInputStream();
-
-                audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
-                    SAMPLE_RATE, CHANNEL_OUT, ENCODING, BUFFER_SIZE, AudioTrack.MODE_STREAM);
-                audioTrack.play();
-                mainHandler.post(() -> updateStatus("👂 Écoute en cours..."));
-
-                byte[] buffer = new byte[BUFFER_SIZE];
-                int read;
-                while (isListening && (read = in.read(buffer)) != -1) {
-                    audioTrack.write(buffer, 0, read);
-                }
-
-                audioTrack.stop();
-                audioTrack.release();
-                mainHandler.post(() -> updateStatus("✅ Prêt"));
-
-            } catch (Exception e) {
-                mainHandler.post(() -> updateStatus("❌ " + e.getMessage()));
-                isListening = false;
             }
         }).start();
     }
@@ -297,7 +432,6 @@ public class MainActivity extends AppCompatActivity {
         try {
             DataInputStream dis = new DataInputStream(client.getInputStream());
             dis.readUTF();
-
             mainHandler.post(() -> {
                 updateStatus("📻 Signal reçu !");
                 tvPeers.setText("Connecté : " + client.getInetAddress().getHostAddress());
@@ -324,9 +458,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void stopSending() {
-        isSending = false;
-    }
+    private void stopSending() { isSending = false; }
 
     private String getLocalIp() {
         try {
@@ -345,9 +477,7 @@ public class MainActivity extends AppCompatActivity {
         return "Inconnu";
     }
 
-    private void updateStatus(String msg) {
-        tvStatus.setText(msg);
-    }
+    private void updateStatus(String msg) { tvStatus.setText(msg); }
 
     private void requestPermissions() {
         ActivityCompat.requestPermissions(this, new String[]{
@@ -365,6 +495,7 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
         isSending = false;
         isListening = false;
+        if (membersTimer != null) membersTimer.cancel();
         try { if (serverSocket != null) serverSocket.close(); } catch (Exception e) {}
         if (serverThread != null) serverThread.interrupt();
     }
