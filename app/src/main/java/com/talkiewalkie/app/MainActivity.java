@@ -28,7 +28,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int BUFFER_SIZE = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, ENCODING) * 2;
     private static final int PORT = 55555;
 
-    private Button btnPush;
+    private Button btnPush, btnListen;
     private TextView tvStatus, tvMode, tvPeers, tvMyIp;
     private RadioGroup rgMode;
     private EditText etTargetIp, etDirectIp, etServerIp, etRoomCode;
@@ -37,6 +37,7 @@ public class MainActivity extends AppCompatActivity {
     private AudioRecord audioRecord;
     private AudioTrack audioTrack;
     private boolean isSending = false;
+    private boolean isListening = false;
     private ServerSocket serverSocket;
     private Thread serverThread;
     private String currentMode = "WIFI";
@@ -49,12 +50,13 @@ public class MainActivity extends AppCompatActivity {
         initViews();
         requestPermissions();
         setupModeSelector();
-        setupPushToTalk();
+        setupButtons();
         startReceiveServer();
     }
 
     private void initViews() {
         btnPush = findViewById(R.id.btnPush);
+        btnListen = findViewById(R.id.btnListen);
         tvStatus = findViewById(R.id.tvStatus);
         tvMode = findViewById(R.id.tvMode);
         tvPeers = findViewById(R.id.tvPeers);
@@ -75,6 +77,7 @@ public class MainActivity extends AppCompatActivity {
             layoutWifi.setVisibility(View.GONE);
             layoutDirect.setVisibility(View.GONE);
             layoutInternet.setVisibility(View.GONE);
+            btnListen.setVisibility(View.GONE);
             if (checkedId == R.id.rbWifi) {
                 currentMode = "WIFI";
                 layoutWifi.setVisibility(View.VISIBLE);
@@ -88,14 +91,16 @@ public class MainActivity extends AppCompatActivity {
             } else if (checkedId == R.id.rbInternet) {
                 currentMode = "INTERNET";
                 layoutInternet.setVisibility(View.VISIBLE);
+                btnListen.setVisibility(View.VISIBLE);
                 tvMode.setText("MODE : Internet (illimité)");
-                updateStatus("Entrez le code salle");
+                updateStatus("Entrez code salle et choisissez Parler ou Écouter");
             }
         });
         rgMode.check(R.id.rbWifi);
     }
 
-    private void setupPushToTalk() {
+    private void setupButtons() {
+        // Bouton PARLER
         btnPush.setOnTouchListener((v, event) -> {
             if (event.getAction() == MotionEvent.ACTION_DOWN) {
                 startSending();
@@ -108,12 +113,24 @@ public class MainActivity extends AppCompatActivity {
             }
             return true;
         });
+
+        // Bouton ÉCOUTER
+        btnListen.setOnClickListener(v -> {
+            if (!isListening) {
+                startListeningInternet();
+                btnListen.setText("🔴 ÉCOUTE EN COURS...");
+                btnListen.setBackgroundColor(0xFFFF4444);
+            } else {
+                stopListening();
+                btnListen.setText("👂 ÉCOUTER");
+                btnListen.setBackgroundColor(0xFF2196F3);
+            }
+        });
     }
 
     private void startSending() {
         if (isSending) return;
         isSending = true;
-
         if (currentMode.equals("INTERNET")) {
             startSendingInternet();
         } else {
@@ -211,32 +228,13 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
-    private void startReceiveServer() {
-        serverThread = new Thread(() -> {
-            try {
-                serverSocket = new ServerSocket(PORT);
-                mainHandler.post(() -> updateStatus("✅ Prêt à recevoir"));
-                while (!Thread.interrupted()) {
-                    Socket client = serverSocket.accept();
-                    new Thread(() -> handleIncoming(client)).start();
-                }
-            } catch (Exception e) {
-                if (e.getMessage() != null && !e.getMessage().contains("closed")) {
-                    mainHandler.post(() -> updateStatus("Serveur: " + e.getMessage()));
-                }
-            }
-        });
-        serverThread.setDaemon(true);
-        serverThread.start();
-
-        if (currentMode.equals("INTERNET")) {
-            startReceivingInternet();
-        }
-    }
-
-    private void startReceivingInternet() {
+    private void startListeningInternet() {
         String room = etRoomCode.getText().toString().trim();
-        if (room.isEmpty()) return;
+        if (room.isEmpty()) {
+            updateStatus("❌ Entrez le code salle !");
+            return;
+        }
+        isListening = true;
 
         new Thread(() -> {
             try {
@@ -249,27 +247,56 @@ public class MainActivity extends AppCompatActivity {
                 audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
                     SAMPLE_RATE, CHANNEL_OUT, ENCODING, BUFFER_SIZE, AudioTrack.MODE_STREAM);
                 audioTrack.play();
-                mainHandler.post(() -> updateStatus("📻 En écoute internet..."));
+                mainHandler.post(() -> updateStatus("👂 Écoute en cours..."));
 
                 byte[] buffer = new byte[BUFFER_SIZE];
                 int read;
-                while ((read = in.read(buffer)) != -1) {
+                while (isListening && (read = in.read(buffer)) != -1) {
                     audioTrack.write(buffer, 0, read);
                 }
 
                 audioTrack.stop();
                 audioTrack.release();
+                mainHandler.post(() -> updateStatus("✅ Prêt"));
 
             } catch (Exception e) {
-                mainHandler.post(() -> updateStatus("Réception: " + e.getMessage()));
+                mainHandler.post(() -> updateStatus("❌ " + e.getMessage()));
+                isListening = false;
             }
         }).start();
+    }
+
+    private void stopListening() {
+        isListening = false;
+        if (audioTrack != null) {
+            audioTrack.stop();
+            audioTrack.release();
+        }
+    }
+
+    private void startReceiveServer() {
+        serverThread = new Thread(() -> {
+            try {
+                serverSocket = new ServerSocket(PORT);
+                mainHandler.post(() -> updateStatus("✅ Prêt"));
+                while (!Thread.interrupted()) {
+                    Socket client = serverSocket.accept();
+                    new Thread(() -> handleIncoming(client)).start();
+                }
+            } catch (Exception e) {
+                if (e.getMessage() != null && !e.getMessage().contains("closed")) {
+                    mainHandler.post(() -> updateStatus("Serveur: " + e.getMessage()));
+                }
+            }
+        });
+        serverThread.setDaemon(true);
+        serverThread.start();
     }
 
     private void handleIncoming(Socket client) {
         try {
             DataInputStream dis = new DataInputStream(client.getInputStream());
-            String code = dis.readUTF();
+            dis.readUTF();
 
             mainHandler.post(() -> {
                 updateStatus("📻 Signal reçu !");
@@ -337,6 +364,7 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         super.onDestroy();
         isSending = false;
+        isListening = false;
         try { if (serverSocket != null) serverSocket.close(); } catch (Exception e) {}
         if (serverThread != null) serverThread.interrupt();
     }
