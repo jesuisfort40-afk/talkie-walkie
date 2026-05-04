@@ -259,53 +259,54 @@ public class MainActivity extends AppCompatActivity {
     // ========== ÉCOUTE INTERNET ==========
 
     private void startListeningInternet() {
-        listenThread = new Thread(() -> {
-            HttpURLConnection conn = null;
-            try {
-                URL url = new URL(SERVER + "/listen?room=" + currentRoom
-                    + "&user=" + URLEncoder.encode(username, "UTF-8"));
-                conn = (HttpURLConnection) url.openConnection();
-                conn.setReadTimeout(0);
-                conn.setConnectTimeout(5000);
+    listenThread = new Thread(() -> {
+        try {
+            audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
+                SAMPLE_RATE, CHANNEL_OUT, ENCODING, BUFFER_SIZE, AudioTrack.MODE_STREAM);
+            audioTrack.play();
+            mainHandler.post(() -> updateStatus("👂 Écoute en cours..."));
 
-                if (conn.getResponseCode() != 200) {
-                    mainHandler.post(() -> updateStatus("❌ Erreur écoute"));
-                    isListening = false;
-                    return;
-                }
+            while (isListening && !Thread.interrupted()) {
+                try {
+                    URL url = new URL(SERVER + "/poll?room=" + currentRoom);
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setConnectTimeout(3000);
+                    conn.setReadTimeout(3000);
+                    int code = conn.getResponseCode();
 
-                audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
-                    SAMPLE_RATE, CHANNEL_OUT, ENCODING, BUFFER_SIZE, AudioTrack.MODE_STREAM);
-                audioTrack.play();
-                mainHandler.post(() -> updateStatus("👂 Écoute en cours..."));
-
-                InputStream in = conn.getInputStream();
-                byte[] buffer = new byte[BUFFER_SIZE];
-                int read;
-
-                // Boucle écoute — continue même quand on parle !
-                while (isListening && !Thread.interrupted()) {
-                    read = in.read(buffer);
-                    if (read > 0) {
-                        audioTrack.write(buffer, 0, read);
+                    if (code == 200) {
+                        // Audio disponible !
+                        InputStream in = conn.getInputStream();
+                        byte[] buffer = new byte[BUFFER_SIZE];
+                        int read = in.read(buffer);
+                        if (read > 0) {
+                            audioTrack.write(buffer, 0, read);
+                        }
+                        in.close();
                     }
-                }
+                    // 204 = pas d'audio, on reessaie
+                    conn.disconnect();
 
-            } catch (Exception e) {
-                if (isListening) {
-                    mainHandler.post(() -> updateStatus("❌ Écoute: " + e.getMessage()));
+                } catch (Exception e) {
+                    // Continue même si une requête échoue
+                    try { Thread.sleep(100); } catch (Exception ignored) {}
                 }
-            } finally {
-                isListening = false;
-                if (audioTrack != null) {
-                    try { audioTrack.stop(); audioTrack.release(); } catch (Exception e) {}
-                }
-                if (conn != null) conn.disconnect();
             }
-        });
-        listenThread.setDaemon(true);
-        listenThread.start();
-    }
+
+        } catch (Exception e) {
+            if (isListening) {
+                mainHandler.post(() -> updateStatus("❌ Écoute: " + e.getMessage()));
+            }
+        } finally {
+            isListening = false;
+            if (audioTrack != null) {
+                try { audioTrack.stop(); audioTrack.release(); } catch (Exception e) {}
+            }
+        }
+    });
+    listenThread.setDaemon(true);
+    listenThread.start();
+}
 
     private void stopListening() {
         isListening = false;
