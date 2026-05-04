@@ -5,9 +5,7 @@ import java.util.*;
 import java.util.concurrent.*;
 
 public class Server {
-    // room -> list of audio output streams (listeners)
-    static Map<String, List<OutputStream>> listeners = new ConcurrentHashMap<>();
-    // room -> list of usernames
+    static Map<String, LinkedBlockingQueue<byte[]>> audioQueues = new ConcurrentHashMap<>();
     static Map<String, Set<String>> members = new ConcurrentHashMap<>();
 
     public static void main(String[] args) throws Exception {
@@ -15,102 +13,80 @@ public class Server {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/create", Server::handleCreate);
         server.createContext("/join", Server::handleJoin);
-        server.createContext("/listen", Server::handleListen);
         server.createContext("/send", Server::handleSend);
+        server.createContext("/poll", Server::handlePoll);
         server.createContext("/members", Server::handleMembers);
         server.createContext("/leave", Server::handleLeave);
         server.createContext("/", ex -> {
-            String r = "Talkie Walkie Server OK";
+            String r = "Talkie Walkie Server V2";
             ex.sendResponseHeaders(200, r.length());
             ex.getResponseBody().write(r.getBytes());
             ex.getResponseBody().close();
         });
         server.setExecutor(Executors.newCachedThreadPool());
         server.start();
-        System.out.println("Serveur demarré port " + port);
+        System.out.println("Serveur V2 démarré port " + port);
     }
 
     static void handleCreate(HttpExchange ex) throws IOException {
         Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
         String user = p.getOrDefault("user", "Anonyme");
         String room = UUID.randomUUID().toString().substring(0, 6).toUpperCase();
-
-        listeners.put(room, Collections.synchronizedList(new ArrayList<>()));
+        audioQueues.put(room, new LinkedBlockingQueue<>(200));
         members.put(room, Collections.synchronizedSet(new LinkedHashSet<>()));
         members.get(room).add(user);
-
-        String resp = "{\"room\":\"" + room + "\",\"status\":\"created\"}";
-        sendJson(ex, 200, resp);
-        System.out.println("Salle créée: " + room + " par " + user);
+        sendJson(ex, 200, "{\"room\":\"" + room + "\",\"status\":\"created\"}");
+        System.out.println("Salle créée: " + room);
     }
 
     static void handleJoin(HttpExchange ex) throws IOException {
         Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
         String room = p.getOrDefault("room", "");
         String user = p.getOrDefault("user", "Anonyme");
-
-        if (!members.containsKey(room)) {
+        if (!audioQueues.containsKey(room)) {
             sendJson(ex, 404, "{\"error\":\"Salle introuvable\"}");
             return;
         }
-
         members.get(room).add(user);
-        String resp = "{\"room\":\"" + room + "\",\"status\":\"joined\"}";
-        sendJson(ex, 200, resp);
+        sendJson(ex, 200, "{\"room\":\"" + room + "\",\"status\":\"joined\"}");
         System.out.println(user + " rejoint: " + room);
-    }
-
-    static void handleListen(HttpExchange ex) throws IOException {
-        Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
-        String room = p.getOrDefault("room", "");
-        String user = p.getOrDefault("user", "Anonyme");
-
-        if (!listeners.containsKey(room)) {
-            sendJson(ex, 404, "{\"error\":\"Salle introuvable\"}");
-            return;
-        }
-
-        ex.getResponseHeaders().add("Content-Type", "application/octet-stream");
-        ex.getResponseHeaders().add("Cache-Control", "no-cache");
-        ex.getResponseHeaders().add("Connection", "keep-alive");
-        ex.sendResponseHeaders(200, 0);
-
-        OutputStream out = ex.getResponseBody();
-        listeners.get(room).add(out);
-        System.out.println(user + " écoute salle: " + room);
-
-        // Garde connexion ouverte
-        synchronized (out) {
-            try { out.wait(); } catch (InterruptedException e) {}
-        }
-
-        listeners.get(room).remove(out);
-        System.out.println(user + " arrêté écoute: " + room);
     }
 
     static void handleSend(HttpExchange ex) throws IOException {
         Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
         String room = p.getOrDefault("room", "");
         byte[] data = ex.getRequestBody().readAllBytes();
-
-        List<OutputStream> outs = listeners.getOrDefault(room, new ArrayList<>());
-        System.out.println("Send " + data.length + " bytes → salle " + room + " (" + outs.size() + " écouteurs)");
-
-        synchronized (outs) {
-            Iterator<OutputStream> it = outs.iterator();
-            while (it.hasNext()) {
-                OutputStream out = it.next();
-                try {
-                    out.write(data);
-                    out.flush();
-                    synchronized (out) { out.notifyAll(); }
-                } catch (Exception e) {
-                    it.remove();
-                }
-            }
+        LinkedBlockingQueue<byte[]> queue = audioQueues.get(room);
+        if (queue != null && data.length > 0) {
+            if (queue.size() >= 200) queue.poll();
+            queue.offer(data);
+            System.out.println("Audio: " + data.length + " bytes → " + room + " queue:" + queue.size());
         }
+        sendJson(ex, 200, "{\"status\":\"ok\"}");
+    }
 
-        sendJson(ex, 200, "{\"status\":\"ok\",\"listeners\":" + outs.size() + "}");
+    static void handlePoll(HttpExchange ex) throws IOException {
+        Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
+        String room = p.getOrDefault("room", "");
+        LinkedBlockingQueue<byte[]> queue = audioQueues.get(room);
+        if (queue == null) {
+            sendJson(ex, 404, "{\"error\":\"Salle introuvable\"}");
+            return;
+        }
+        try {
+            byte[] data = queue.poll(1000, TimeUnit.MILLISECONDS);
+            if (data != null) {
+                ex.getResponseHeaders().add("Content-Type", "application/octet-stream");
+                ex.sendResponseHeaders(200, data.length);
+                ex.getResponseBody().write(data);
+                ex.getResponseBody().close();
+                System.out.println("Poll: envoyé " + data.length + " bytes → " + room);
+            } else {
+                ex.sendResponseHeaders(204, -1);
+            }
+        } catch (InterruptedException e) {
+            ex.sendResponseHeaders(204, -1);
+        }
     }
 
     static void handleMembers(HttpExchange ex) throws IOException {
@@ -137,8 +113,9 @@ public class Server {
 
     static void sendJson(HttpExchange ex, int code, String body) throws IOException {
         ex.getResponseHeaders().add("Content-Type", "application/json");
-        ex.sendResponseHeaders(code, body.getBytes().length);
-        ex.getResponseBody().write(body.getBytes());
+        byte[] bytes = body.getBytes();
+        ex.sendResponseHeaders(code, bytes.length);
+        ex.getResponseBody().write(bytes);
         ex.getResponseBody().close();
     }
 
@@ -147,7 +124,10 @@ public class Server {
         if (query == null) return map;
         for (String part : query.split("&")) {
             String[] kv = part.split("=");
-            if (kv.length == 2) map.put(kv[0], URLDecoder.decode(kv[1], java.nio.charset.StandardCharsets.UTF_8));
+            if (kv.length == 2) {
+                try { map.put(kv[0], URLDecoder.decode(kv[1], "UTF-8")); }
+                catch (Exception e) { map.put(kv[0], kv[1]); }
+            }
         }
         return map;
     }
