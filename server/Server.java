@@ -5,82 +5,126 @@ import java.util.*;
 import java.util.concurrent.*;
 
 public class Server {
-    static Map<String, LinkedBlockingQueue<byte[]>> audioQueues = new ConcurrentHashMap<>();
+
+    // room -> (username -> queue personnelle)
+    static Map<String, Map<String, LinkedBlockingQueue<byte[]>>> userQueues = new ConcurrentHashMap<>();
+    // room -> membres (ordre insertion)
     static Map<String, Set<String>> members = new ConcurrentHashMap<>();
 
     public static void main(String[] args) throws Exception {
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
-        server.createContext("/create", Server::handleCreate);
-        server.createContext("/join", Server::handleJoin);
-        server.createContext("/send", Server::handleSend);
-        server.createContext("/poll", Server::handlePoll);
+        server.createContext("/create",  Server::handleCreate);
+        server.createContext("/join",    Server::handleJoin);
+        server.createContext("/send",    Server::handleSend);
+        server.createContext("/poll",    Server::handlePoll);
         server.createContext("/members", Server::handleMembers);
-        server.createContext("/leave", Server::handleLeave);
+        server.createContext("/leave",   Server::handleLeave);
         server.createContext("/", ex -> {
-            String r = "Talkie Walkie Server V2";
+            String r = "Talkie Walkie Server V3";
             ex.sendResponseHeaders(200, r.length());
             ex.getResponseBody().write(r.getBytes());
             ex.getResponseBody().close();
         });
         server.setExecutor(Executors.newCachedThreadPool());
         server.start();
-        System.out.println("Serveur V2 démarré port " + port);
+        System.out.println("Serveur V3 démarré port " + port);
     }
+
+    // ─── CRÉER SALLE ────────────────────────────────────────────────────────────
 
     static void handleCreate(HttpExchange ex) throws IOException {
         Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
         String user = p.getOrDefault("user", "Anonyme");
         String room = UUID.randomUUID().toString().substring(0, 6).toUpperCase();
-        audioQueues.put(room, new LinkedBlockingQueue<>(200));
-        members.put(room, Collections.synchronizedSet(new LinkedHashSet<>()));
-        members.get(room).add(user);
+
+        Map<String, LinkedBlockingQueue<byte[]>> queues = new ConcurrentHashMap<>();
+        queues.put(user, new LinkedBlockingQueue<>(300));
+        userQueues.put(room, queues);
+
+        Set<String> m = Collections.synchronizedSet(new LinkedHashSet<>());
+        m.add(user);
+        members.put(room, m);
+
         sendJson(ex, 200, "{\"room\":\"" + room + "\",\"status\":\"created\"}");
-        System.out.println("Salle créée: " + room);
+        System.out.println("Salle créée: " + room + " par " + user);
     }
+
+    // ─── REJOINDRE SALLE ────────────────────────────────────────────────────────
 
     static void handleJoin(HttpExchange ex) throws IOException {
         Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
         String room = p.getOrDefault("room", "");
         String user = p.getOrDefault("user", "Anonyme");
-        if (!audioQueues.containsKey(room)) {
+
+        if (!userQueues.containsKey(room)) {
             sendJson(ex, 404, "{\"error\":\"Salle introuvable\"}");
             return;
         }
+
+        // Créer une queue perso pour ce nouvel utilisateur
+        userQueues.get(room).putIfAbsent(user, new LinkedBlockingQueue<>(300));
         members.get(room).add(user);
+
         sendJson(ex, 200, "{\"room\":\"" + room + "\",\"status\":\"joined\"}");
         System.out.println(user + " rejoint: " + room);
     }
 
+    // ─── ENVOYER AUDIO ──────────────────────────────────────────────────────────
+    // /send?room=X&sender=Y
+    // L'audio est poussé dans la queue de TOUS les membres SAUF l'expéditeur
+
     static void handleSend(HttpExchange ex) throws IOException {
         Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
-        String room = p.getOrDefault("room", "");
+        String room   = p.getOrDefault("room", "");
+        String sender = p.getOrDefault("sender", "");
+
         byte[] data = ex.getRequestBody().readAllBytes();
-        LinkedBlockingQueue<byte[]> queue = audioQueues.get(room);
-        if (queue != null && data.length > 0) {
-            if (queue.size() >= 200) queue.poll();
-            queue.offer(data);
-            System.out.println("Audio: " + data.length + " bytes → " + room + " queue:" + queue.size());
+
+        Map<String, LinkedBlockingQueue<byte[]>> queues = userQueues.get(room);
+        if (queues != null && data.length > 0) {
+            for (Map.Entry<String, LinkedBlockingQueue<byte[]>> entry : queues.entrySet()) {
+                if (!entry.getKey().equals(sender)) { // Ne pas s'envoyer à soi-même
+                    LinkedBlockingQueue<byte[]> q = entry.getValue();
+                    if (q.size() >= 300) q.poll(); // Vider si pleine (évite le blocage)
+                    q.offer(data);
+                }
+            }
+            System.out.println("Audio: " + data.length + " bytes | " + room + " | sender=" + sender);
         }
+
         sendJson(ex, 200, "{\"status\":\"ok\"}");
     }
+
+    // ─── RECEVOIR AUDIO ─────────────────────────────────────────────────────────
+    // /poll?room=X&user=Y
+    // Long-poll : attend jusqu'à 2s pour avoir un chunk, sinon 204
 
     static void handlePoll(HttpExchange ex) throws IOException {
         Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
         String room = p.getOrDefault("room", "");
-        LinkedBlockingQueue<byte[]> queue = audioQueues.get(room);
-        if (queue == null) {
+        String user = p.getOrDefault("user", "");
+
+        Map<String, LinkedBlockingQueue<byte[]>> queues = userQueues.get(room);
+        if (queues == null) {
             sendJson(ex, 404, "{\"error\":\"Salle introuvable\"}");
             return;
         }
+
+        LinkedBlockingQueue<byte[]> myQueue = queues.get(user);
+        if (myQueue == null) {
+            sendJson(ex, 403, "{\"error\":\"Utilisateur non enregistré dans cette salle\"}");
+            return;
+        }
+
         try {
-            byte[] data = queue.poll(1000, TimeUnit.MILLISECONDS);
+            byte[] data = myQueue.poll(2000, TimeUnit.MILLISECONDS);
             if (data != null) {
                 ex.getResponseHeaders().add("Content-Type", "application/octet-stream");
                 ex.sendResponseHeaders(200, data.length);
                 ex.getResponseBody().write(data);
                 ex.getResponseBody().close();
-                System.out.println("Poll: envoyé " + data.length + " bytes → " + room);
+                System.out.println("Poll: " + data.length + " bytes → " + user + "@" + room);
             } else {
                 ex.sendResponseHeaders(204, -1);
             }
@@ -88,6 +132,8 @@ public class Server {
             ex.sendResponseHeaders(204, -1);
         }
     }
+
+    // ─── MEMBRES ────────────────────────────────────────────────────────────────
 
     static void handleMembers(HttpExchange ex) throws IOException {
         Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
@@ -103,13 +149,28 @@ public class Server {
         sendJson(ex, 200, "{\"members\":" + sb + ",\"count\":" + m.size() + "}");
     }
 
+    // ─── QUITTER ────────────────────────────────────────────────────────────────
+
     static void handleLeave(HttpExchange ex) throws IOException {
         Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
         String room = p.getOrDefault("room", "");
         String user = p.getOrDefault("user", "");
-        if (members.containsKey(room)) members.get(room).remove(user);
+
+        if (members.containsKey(room))    members.get(room).remove(user);
+        if (userQueues.containsKey(room)) userQueues.get(room).remove(user);
+
+        // Nettoyer la salle si vide
+        if (members.containsKey(room) && members.get(room).isEmpty()) {
+            members.remove(room);
+            userQueues.remove(room);
+            System.out.println("Salle supprimée (vide): " + room);
+        }
+
         sendJson(ex, 200, "{\"status\":\"left\"}");
+        System.out.println(user + " a quitté: " + room);
     }
+
+    // ─── UTILITAIRES ────────────────────────────────────────────────────────────
 
     static void sendJson(HttpExchange ex, int code, String body) throws IOException {
         ex.getResponseHeaders().add("Content-Type", "application/json");
