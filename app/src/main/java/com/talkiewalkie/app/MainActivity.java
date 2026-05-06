@@ -264,8 +264,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // ÉCOUTE INTERNET — BUG #2 CORRIGÉ : timeout adapté au long-poll serveur
+    // ÉCOUTE INTERNET — Connexion persistante + Jitter Buffer
     // ═══════════════════════════════════════════════════════════════════════════
+
+    // Nombre de chunks à pré-charger avant de commencer la lecture
+    // 3 chunks × 256ms = ~768ms de tampon → absorbe la gigue réseau
+    private static final int JITTER_BUFFER_CHUNKS = 3;
 
     private void startListeningInternet() {
         listenThread = new Thread(() -> {
@@ -273,48 +277,69 @@ public class MainActivity extends AppCompatActivity {
                 internetAudioTrack = new AudioTrack(
                         AudioManager.STREAM_MUSIC,
                         SAMPLE_RATE, CHANNEL_OUT, ENCODING,
-                        BUFFER_SIZE * 4, AudioTrack.MODE_STREAM
+                        BUFFER_SIZE * 8, // grand buffer interne AudioTrack
+                        AudioTrack.MODE_STREAM
                 );
-                internetAudioTrack.play();
-                mainHandler.post(() -> updateStatus("👂 Écoute en cours..."));
+
+                mainHandler.post(() -> updateStatus("👂 Connexion au serveur..."));
+
+                // Connexion HTTP persistante — une seule pour toute la session
+                URL url = new URL(SERVER + "/stream?room=" + currentRoom
+                        + "&user=" + URLEncoder.encode(username, "UTF-8"));
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(0); // PAS de timeout → connexion permanente
+                conn.setRequestProperty("Accept", "application/octet-stream");
+
+                int code = conn.getResponseCode();
+                if (code != 200) {
+                    mainHandler.post(() -> updateStatus("❌ Serveur: " + code));
+                    return;
+                }
+
+                DataInputStream dis = new DataInputStream(
+                        new BufferedInputStream(conn.getInputStream(), 65536)
+                );
+
+                // ── Jitter buffer : on accumule N chunks avant de jouer ────────
+                List<byte[]> jitterBuffer = new ArrayList<>();
+                boolean buffering = true;
+                mainHandler.post(() -> updateStatus("⏳ Tampon audio..."));
 
                 while (isListening && !Thread.interrupted()) {
-                    try {
-                        // ── BUG #2 CORRIGÉ ─────────────────────────────────────
-                        // Le serveur long-poll attend 2000ms.
-                        // Connect : 3s, Read : 4s (>2s du serveur + marge réseau)
-                        URL url = new URL(SERVER + "/poll?room=" + currentRoom
-                                + "&user=" + URLEncoder.encode(username, "UTF-8"));
-                        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                        conn.setConnectTimeout(3000);
-                        conn.setReadTimeout(4000); // ✅ was 2000, now 4000
+                    // Lire taille du prochain chunk (4 bytes big-endian)
+                    int size = dis.readInt();
 
-                        int code = conn.getResponseCode();
-                        if (code == 200) {
-                            InputStream in = conn.getInputStream();
-                            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-                            byte[] tmp = new byte[4096];
-                            int r;
-                            while ((r = in.read(tmp)) != -1) {
-                                bos.write(tmp, 0, r);
+                    if (size == 0) continue; // keepalive serveur, ignorer
+
+                    byte[] data = new byte[size];
+                    dis.readFully(data);
+
+                    if (buffering) {
+                        jitterBuffer.add(data);
+                        if (jitterBuffer.size() >= JITTER_BUFFER_CHUNKS) {
+                            // Buffer plein → démarrer la lecture
+                            internetAudioTrack.play();
+                            for (byte[] chunk : jitterBuffer) {
+                                internetAudioTrack.write(chunk, 0, chunk.length);
                             }
-                            byte[] data = bos.toByteArray();
-                            if (data.length > 0 && internetAudioTrack != null) {
-                                internetAudioTrack.write(data, 0, data.length);
-                            }
-                            in.close();
+                            jitterBuffer.clear();
+                            buffering = false;
+                            mainHandler.post(() -> updateStatus("👂 Écoute en cours..."));
                         }
-                        // 204 = silence, on reboucle immédiatement
-                        conn.disconnect();
-
-                    } catch (Exception e) {
-                        // Pause courte en cas d'erreur réseau, puis on réessaie
-                        try { Thread.sleep(100); } catch (Exception ignored) {}
+                    } else {
+                        internetAudioTrack.write(data, 0, data.length);
                     }
                 }
 
+                conn.disconnect();
+
+            } catch (EOFException e) {
+                mainHandler.post(() -> updateStatus("📵 Connexion fermée"));
             } catch (Exception e) {
-                mainHandler.post(() -> updateStatus("❌ Écoute: " + e.getMessage()));
+                if (isListening) {
+                    mainHandler.post(() -> updateStatus("❌ Écoute: " + e.getMessage()));
+                }
             } finally {
                 isListening = false;
                 releaseInternetAudioTrack();
@@ -339,12 +364,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // ENVOI INTERNET — BUG #1 + #3 CORRIGÉS
+    // ENVOI INTERNET — Connexion persistante (une seule pour toute la session)
     // ═══════════════════════════════════════════════════════════════════════════
 
     private void startSendingInternet() {
         sendThread = new Thread(() -> {
             AudioRecord recorder = null;
+            HttpURLConnection conn = null;
             try {
                 recorder = new AudioRecord(
                         MediaRecorder.AudioSource.MIC,
@@ -353,45 +379,57 @@ public class MainActivity extends AppCompatActivity {
                 recorder.startRecording();
                 audioRecord = recorder;
 
-                // ── BUG #3 CORRIGÉ : accumulation de chunks avant envoi ────────
-                // On accumule dans un buffer jusqu'à SEND_CHUNK bytes (≈256ms)
-                // → ~4 req/s au lieu de 40 req/s → passe sur internet
+                // Une seule connexion HTTP persistante avec chunked upload
+                URL url = new URL(SERVER + "/send?room=" + currentRoom
+                        + "&sender=" + URLEncoder.encode(username, "UTF-8"));
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setDoOutput(true);
+                conn.setChunkedStreamingMode(SEND_CHUNK); // chunked upload sans buffer complet en mémoire
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(0); // connexion permanente
+                conn.setRequestProperty("Content-Type", "application/octet-stream");
+
+                DataOutputStream dos = new DataOutputStream(
+                        new BufferedOutputStream(conn.getOutputStream(), SEND_CHUNK * 2)
+                );
+
                 ByteArrayOutputStream accumulator = new ByteArrayOutputStream();
                 byte[] buffer = new byte[BUFFER_SIZE];
+                mainHandler.post(() -> updateStatus("📡 Transmission..."));
 
                 while (isSending && !Thread.interrupted()) {
                     int read = recorder.read(buffer, 0, buffer.length);
                     if (read > 0) {
                         accumulator.write(buffer, 0, read);
-
                         if (accumulator.size() >= SEND_CHUNK) {
-                            final byte[] data = accumulator.toByteArray();
+                            byte[] data = accumulator.toByteArray();
                             accumulator.reset();
-                            try {
-                                // ── BUG #1 CORRIGÉ : on passe sender= ──────────
-                                URL url = new URL(SERVER + "/send?room=" + currentRoom
-                                        + "&sender=" + URLEncoder.encode(username, "UTF-8"));
-                                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                                conn.setRequestMethod("POST");
-                                conn.setDoOutput(true);
-                                conn.setConnectTimeout(3000);
-                                conn.setReadTimeout(3000);
-                                conn.getOutputStream().write(data);
-                                conn.getOutputStream().flush();
-                                conn.getResponseCode(); // attend la réponse du serveur
-                                conn.disconnect();
-                            } catch (Exception ignored) {}
+                            // Préfixe taille (4 bytes) + données — même format que /stream
+                            int len = data.length;
+                            dos.write(new byte[]{
+                                (byte)(len >> 24), (byte)(len >> 16),
+                                (byte)(len >> 8),  (byte)(len)
+                            });
+                            dos.write(data);
+                            dos.flush();
                         }
                     }
                 }
 
+                dos.close();
+
             } catch (Exception e) {
-                mainHandler.post(() -> updateStatus("❌ Micro: " + e.getMessage()));
+                if (isSending) {
+                    mainHandler.post(() -> updateStatus("❌ Micro: " + e.getMessage()));
+                }
             } finally {
                 if (recorder != null) {
-                    try { recorder.stop(); recorder.release(); } catch (Exception e) {}
+                    try { recorder.stop(); recorder.release(); } catch (Exception ignored) {}
                 }
+                if (conn != null) conn.disconnect();
                 audioRecord = null;
+                isSending = false;
             }
         });
         sendThread.setDaemon(true);
