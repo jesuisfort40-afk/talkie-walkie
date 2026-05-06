@@ -17,7 +17,8 @@ public class Server {
         server.createContext("/create",  Server::handleCreate);
         server.createContext("/join",    Server::handleJoin);
         server.createContext("/send",    Server::handleSend);
-        server.createContext("/poll",    Server::handlePoll);
+        server.createContext("/stream",  Server::handleStream); // connexion persistante
+        server.createContext("/poll",    Server::handlePoll);   // fallback court-poll
         server.createContext("/members", Server::handleMembers);
         server.createContext("/leave",   Server::handleLeave);
         server.createContext("/", ex -> {
@@ -39,7 +40,7 @@ public class Server {
         String room = UUID.randomUUID().toString().substring(0, 6).toUpperCase();
 
         Map<String, LinkedBlockingQueue<byte[]>> queues = new ConcurrentHashMap<>();
-        queues.put(user, new LinkedBlockingQueue<>(300));
+        queues.put(user, new LinkedBlockingQueue<>(1000));
         userQueues.put(room, queues);
 
         Set<String> m = Collections.synchronizedSet(new LinkedHashSet<>());
@@ -63,7 +64,7 @@ public class Server {
         }
 
         // Créer une queue perso pour ce nouvel utilisateur
-        userQueues.get(room).putIfAbsent(user, new LinkedBlockingQueue<>(300));
+        userQueues.get(room).putIfAbsent(user, new LinkedBlockingQueue<>(1000));
         members.get(room).add(user);
 
         sendJson(ex, 200, "{\"room\":\"" + room + "\",\"status\":\"joined\"}");
@@ -72,28 +73,49 @@ public class Server {
 
     // ─── ENVOYER AUDIO ──────────────────────────────────────────────────────────
     // /send?room=X&sender=Y
-    // L'audio est poussé dans la queue de TOUS les membres SAUF l'expéditeur
+    // Connexion persistante : lit [4 bytes taille big-endian][N bytes audio]
+    // en boucle jusqu'à fermeture du client
 
     static void handleSend(HttpExchange ex) throws IOException {
         Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
         String room   = p.getOrDefault("room", "");
         String sender = p.getOrDefault("sender", "");
 
-        byte[] data = ex.getRequestBody().readAllBytes();
-
         Map<String, LinkedBlockingQueue<byte[]>> queues = userQueues.get(room);
-        if (queues != null && data.length > 0) {
-            for (Map.Entry<String, LinkedBlockingQueue<byte[]>> entry : queues.entrySet()) {
-                if (!entry.getKey().equals(sender)) { // Ne pas s'envoyer à soi-même
-                    LinkedBlockingQueue<byte[]> q = entry.getValue();
-                    if (q.size() >= 300) q.poll(); // Vider si pleine (évite le blocage)
-                    q.offer(data);
+        if (queues == null) { sendJson(ex, 404, "{\"error\":\"Salle introuvable\"}"); return; }
+
+        // Répondre 200 tout de suite pour débloquer le client
+        ex.sendResponseHeaders(200, 0);
+        OutputStream responseOut = ex.getResponseBody();
+
+        DataInputStream dis = new DataInputStream(
+                new BufferedInputStream(ex.getRequestBody(), 65536)
+        );
+
+        System.out.println("Send stream ouvert: " + sender + "@" + room);
+        try {
+            while (true) {
+                int size = dis.readInt(); // 4 bytes big-endian
+                if (size <= 0 || size > 65536) break; // fin du stream
+
+                byte[] data = new byte[size];
+                dis.readFully(data);
+
+                for (Map.Entry<String, LinkedBlockingQueue<byte[]>> entry : queues.entrySet()) {
+                    if (!entry.getKey().equals(sender)) {
+                        LinkedBlockingQueue<byte[]> q = entry.getValue();
+                        if (q.size() >= 900) { q.poll(); q.poll(); q.poll(); }
+                        q.offer(data);
+                    }
                 }
             }
-            System.out.println("Audio: " + data.length + " bytes | " + room + " | sender=" + sender);
+        } catch (EOFException e) {
+            System.out.println("Send stream fermé: " + sender + "@" + room);
+        } catch (IOException e) {
+            System.out.println("Send stream perdu: " + sender + " - " + e.getMessage());
+        } finally {
+            try { responseOut.close(); } catch (Exception e) {}
         }
-
-        sendJson(ex, 200, "{\"status\":\"ok\"}");
     }
 
     // ─── RECEVOIR AUDIO ─────────────────────────────────────────────────────────
@@ -130,6 +152,57 @@ public class Server {
             }
         } catch (InterruptedException e) {
             ex.sendResponseHeaders(204, -1);
+        }
+    }
+
+    // ─── STREAM PERSISTANT ──────────────────────────────────────────────────────
+    // /stream?room=X&user=Y
+    // Connexion HTTP gardée ouverte : les chunks arrivent sans overhead TCP
+    // Format : [4 bytes int big-endian = taille] [N bytes audio]
+
+    static void handleStream(HttpExchange ex) throws IOException {
+        Map<String, String> p = parseQuery(ex.getRequestURI().getQuery());
+        String room = p.getOrDefault("room", "");
+        String user = p.getOrDefault("user", "");
+
+        Map<String, LinkedBlockingQueue<byte[]>> queues = userQueues.get(room);
+        if (queues == null) { sendJson(ex, 404, "{\"error\":\"Salle introuvable\"}"); return; }
+
+        LinkedBlockingQueue<byte[]> myQueue = queues.get(user);
+        if (myQueue == null) { sendJson(ex, 403, "{\"error\":\"Utilisateur non enregistré\"}"); return; }
+
+        ex.getResponseHeaders().add("Content-Type", "application/octet-stream");
+        ex.getResponseHeaders().add("Transfer-Encoding", "chunked");
+        ex.getResponseHeaders().add("Cache-Control", "no-cache");
+        ex.sendResponseHeaders(200, 0); // 0 = réponse de longueur inconnue (streaming)
+
+        OutputStream out = ex.getResponseBody();
+        System.out.println("Stream ouvert: " + user + "@" + room);
+
+        try {
+            while (true) {
+                byte[] data = myQueue.poll(5000, TimeUnit.MILLISECONDS);
+                if (data == null) {
+                    // Keepalive : envoyer un paquet vide (taille 0) pour garder la connexion
+                    out.write(new byte[]{0, 0, 0, 0});
+                    out.flush();
+                    continue;
+                }
+                // Écrire taille (4 bytes big-endian) puis données
+                int len = data.length;
+                out.write(new byte[]{
+                    (byte)(len >> 24), (byte)(len >> 16),
+                    (byte)(len >> 8),  (byte)(len)
+                });
+                out.write(data);
+                out.flush();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (IOException e) {
+            System.out.println("Stream fermé: " + user + "@" + room + " (" + e.getMessage() + ")");
+        } finally {
+            try { out.close(); } catch (Exception e) {}
         }
     }
 
