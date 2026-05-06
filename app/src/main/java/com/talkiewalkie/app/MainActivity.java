@@ -21,36 +21,41 @@ import java.util.*;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final int SAMPLE_RATE = 44100;
-    private static final int CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO;
+    // ── BUG #4 CORRIGÉ : 16000 Hz au lieu de 44100 (4x moins de données) ──────
+    private static final int SAMPLE_RATE = 16000;
+    private static final int CHANNEL_IN  = AudioFormat.CHANNEL_IN_MONO;
     private static final int CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO;
-    private static final int ENCODING = AudioFormat.ENCODING_PCM_16BIT;
-    private static final int BUFFER_SIZE = AudioRecord.getMinBufferSize(44100, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT) * 2;
-    private static final int PORT = 55555;
+    private static final int ENCODING    = AudioFormat.ENCODING_PCM_16BIT;
+    private static final int BUFFER_SIZE = AudioRecord.getMinBufferSize(
+            SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT) * 2;
+
+    private static final int    PORT   = 55555;
     private static final String SERVER = "https://talkie-walkie-production.up.railway.app";
 
-    private Button btnPush, btnListen, btnCreate, btnJoin;
+    // ── BUG #3 CORRIGÉ : chunk plus grand = moins de connexions HTTP ──────────
+    // À 16000 Hz / 16-bit : 8192 bytes ≈ 256ms d'audio → ~4 requêtes/s au lieu de 40
+    private static final int SEND_CHUNK = 8192;
+
+    private Button   btnPush, btnListen, btnCreate, btnJoin;
     private TextView tvStatus, tvMode, tvPeers, tvMyIp, tvRoom, tvMembers;
     private RadioGroup rgMode;
-    private EditText etTargetIp, etDirectIp, etRoomCode, etUsername;
+    private EditText   etTargetIp, etDirectIp, etRoomCode, etUsername;
     private LinearLayout layoutWifi, layoutDirect, layoutInternet, layoutRoom;
 
-    // Audio séparé pour écoute internet et réception locale
     private AudioRecord audioRecord;
-    private AudioTrack internetAudioTrack;
-    private AudioTrack localAudioTrack;
+    private AudioTrack  internetAudioTrack;
 
-    private boolean isSending = false;
+    private boolean isSending   = false;
     private boolean isListening = false;
-    private boolean inRoom = false;
+    private boolean inRoom      = false;
 
     private ServerSocket serverSocket;
     private Thread serverThread, listenThread, sendThread;
-    private String currentMode = "WIFI";
-    private String currentRoom = "";
-    private String username = "";
+    private String  currentMode = "WIFI";
+    private String  currentRoom = "";
+    private String  username    = "";
     private Handler mainHandler = new Handler(Looper.getMainLooper());
-    private Timer membersTimer;
+    private Timer   membersTimer;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -64,25 +69,25 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void initViews() {
-        btnPush = findViewById(R.id.btnPush);
-        btnListen = findViewById(R.id.btnListen);
-        btnCreate = findViewById(R.id.btnCreate);
-        btnJoin = findViewById(R.id.btnJoin);
-        tvStatus = findViewById(R.id.tvStatus);
-        tvMode = findViewById(R.id.tvMode);
-        tvPeers = findViewById(R.id.tvPeers);
-        tvMyIp = findViewById(R.id.tvMyIp);
-        tvRoom = findViewById(R.id.tvRoom);
-        tvMembers = findViewById(R.id.tvMembers);
-        rgMode = findViewById(R.id.rgMode);
+        btnPush    = findViewById(R.id.btnPush);
+        btnListen  = findViewById(R.id.btnListen);
+        btnCreate  = findViewById(R.id.btnCreate);
+        btnJoin    = findViewById(R.id.btnJoin);
+        tvStatus   = findViewById(R.id.tvStatus);
+        tvMode     = findViewById(R.id.tvMode);
+        tvPeers    = findViewById(R.id.tvPeers);
+        tvMyIp     = findViewById(R.id.tvMyIp);
+        tvRoom     = findViewById(R.id.tvRoom);
+        tvMembers  = findViewById(R.id.tvMembers);
+        rgMode     = findViewById(R.id.rgMode);
         etTargetIp = findViewById(R.id.etTargetIp);
         etDirectIp = findViewById(R.id.etDirectIp);
         etRoomCode = findViewById(R.id.etRoomCode);
         etUsername = findViewById(R.id.etUsername);
-        layoutWifi = findViewById(R.id.layoutWifi);
-        layoutDirect = findViewById(R.id.layoutDirect);
+        layoutWifi     = findViewById(R.id.layoutWifi);
+        layoutDirect   = findViewById(R.id.layoutDirect);
         layoutInternet = findViewById(R.id.layoutInternet);
-        layoutRoom = findViewById(R.id.layoutRoom);
+        layoutRoom     = findViewById(R.id.layoutRoom);
         tvMyIp.setText("Mon IP : " + getLocalIp());
     }
 
@@ -119,7 +124,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setupButtons() {
-        // PARLER
+
+        // ── PARLER ──────────────────────────────────────────────────────────────
         btnPush.setOnTouchListener((v, event) -> {
             if (event.getAction() == MotionEvent.ACTION_DOWN) {
                 if (currentMode.equals("INTERNET") && !inRoom) {
@@ -143,7 +149,7 @@ public class MainActivity extends AppCompatActivity {
             return true;
         });
 
-        // ÉCOUTER
+        // ── ÉCOUTER ─────────────────────────────────────────────────────────────
         btnListen.setOnClickListener(v -> {
             if (!inRoom) {
                 updateStatus("❌ Rejoins une salle d'abord !");
@@ -162,7 +168,7 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // CRÉER
+        // ── CRÉER SALLE ─────────────────────────────────────────────────────────
         btnCreate.setOnClickListener(v -> {
             username = etUsername.getText().toString().trim();
             if (username.isEmpty()) {
@@ -172,7 +178,7 @@ public class MainActivity extends AppCompatActivity {
             createRoom();
         });
 
-        // REJOINDRE
+        // ── REJOINDRE SALLE ─────────────────────────────────────────────────────
         btnJoin.setOnClickListener(v -> {
             username = etUsername.getText().toString().trim();
             String room = etRoomCode.getText().toString().trim().toUpperCase();
@@ -188,7 +194,9 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    // ========== SALLE ==========
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SALLE
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private void createRoom() {
         new Thread(() -> {
@@ -196,12 +204,15 @@ public class MainActivity extends AppCompatActivity {
                 URL url = new URL(SERVER + "/create?user=" + URLEncoder.encode(username, "UTF-8"));
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setConnectTimeout(5000);
+                conn.setReadTimeout(5000);
                 BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
                 String response = br.readLine();
                 conn.disconnect();
+
                 String room = response.split("\"room\":\"")[1].split("\"")[0];
                 currentRoom = room;
                 inRoom = true;
+
                 mainHandler.post(() -> {
                     tvRoom.setText("🏠 Code : " + room + "\n👆 Partage ce code !");
                     layoutRoom.setVisibility(View.VISIBLE);
@@ -222,17 +233,20 @@ public class MainActivity extends AppCompatActivity {
         new Thread(() -> {
             try {
                 URL url = new URL(SERVER + "/join?room=" + room
-                    + "&user=" + URLEncoder.encode(username, "UTF-8"));
+                        + "&user=" + URLEncoder.encode(username, "UTF-8"));
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setConnectTimeout(5000);
+                conn.setReadTimeout(5000);
                 int code = conn.getResponseCode();
                 conn.disconnect();
+
                 if (code == 404) {
                     mainHandler.post(() -> updateStatus("❌ Salle introuvable !"));
                     return;
                 }
                 currentRoom = room;
                 inRoom = true;
+
                 mainHandler.post(() -> {
                     tvRoom.setText("🏠 Salle : " + room);
                     layoutRoom.setVisibility(View.VISIBLE);
@@ -249,31 +263,37 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
-    // ========== ÉCOUTE INTERNET ==========
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ÉCOUTE INTERNET — BUG #2 CORRIGÉ : timeout adapté au long-poll serveur
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private void startListeningInternet() {
         listenThread = new Thread(() -> {
             try {
-                // AudioTrack séparé pour internet
                 internetAudioTrack = new AudioTrack(
-                    AudioManager.STREAM_MUSIC,
-                    SAMPLE_RATE, CHANNEL_OUT, ENCODING,
-                    BUFFER_SIZE * 4, AudioTrack.MODE_STREAM
+                        AudioManager.STREAM_MUSIC,
+                        SAMPLE_RATE, CHANNEL_OUT, ENCODING,
+                        BUFFER_SIZE * 4, AudioTrack.MODE_STREAM
                 );
                 internetAudioTrack.play();
                 mainHandler.post(() -> updateStatus("👂 Écoute en cours..."));
 
                 while (isListening && !Thread.interrupted()) {
                     try {
-                        URL url = new URL(SERVER + "/poll?room=" + currentRoom);
+                        // ── BUG #2 CORRIGÉ ─────────────────────────────────────
+                        // Le serveur long-poll attend 2000ms.
+                        // Connect : 3s, Read : 4s (>2s du serveur + marge réseau)
+                        URL url = new URL(SERVER + "/poll?room=" + currentRoom
+                                + "&user=" + URLEncoder.encode(username, "UTF-8"));
                         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                        conn.setConnectTimeout(2000);
-                        conn.setReadTimeout(2000);
+                        conn.setConnectTimeout(3000);
+                        conn.setReadTimeout(4000); // ✅ was 2000, now 4000
+
                         int code = conn.getResponseCode();
                         if (code == 200) {
                             InputStream in = conn.getInputStream();
                             ByteArrayOutputStream bos = new ByteArrayOutputStream();
-                            byte[] tmp = new byte[1024];
+                            byte[] tmp = new byte[4096];
                             int r;
                             while ((r = in.read(tmp)) != -1) {
                                 bos.write(tmp, 0, r);
@@ -284,9 +304,12 @@ public class MainActivity extends AppCompatActivity {
                             }
                             in.close();
                         }
+                        // 204 = silence, on reboucle immédiatement
                         conn.disconnect();
+
                     } catch (Exception e) {
-                        try { Thread.sleep(50); } catch (Exception ignored) {}
+                        // Pause courte en cas d'erreur réseau, puis on réessaie
+                        try { Thread.sleep(100); } catch (Exception ignored) {}
                     }
                 }
 
@@ -310,46 +333,58 @@ public class MainActivity extends AppCompatActivity {
 
     private void releaseInternetAudioTrack() {
         if (internetAudioTrack != null) {
-            try {
-                internetAudioTrack.stop();
-                internetAudioTrack.release();
-                internetAudioTrack = null;
-            } catch (Exception e) {}
+            try { internetAudioTrack.stop(); internetAudioTrack.release(); } catch (Exception e) {}
+            internetAudioTrack = null;
         }
     }
 
-    // ========== ENVOI INTERNET ==========
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ENVOI INTERNET — BUG #1 + #3 CORRIGÉS
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private void startSendingInternet() {
         sendThread = new Thread(() -> {
             AudioRecord recorder = null;
             try {
                 recorder = new AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    SAMPLE_RATE, CHANNEL_IN, ENCODING, BUFFER_SIZE
+                        MediaRecorder.AudioSource.MIC,
+                        SAMPLE_RATE, CHANNEL_IN, ENCODING, BUFFER_SIZE
                 );
                 recorder.startRecording();
                 audioRecord = recorder;
 
-                byte[] buffer = new byte[2048];
+                // ── BUG #3 CORRIGÉ : accumulation de chunks avant envoi ────────
+                // On accumule dans un buffer jusqu'à SEND_CHUNK bytes (≈256ms)
+                // → ~4 req/s au lieu de 40 req/s → passe sur internet
+                ByteArrayOutputStream accumulator = new ByteArrayOutputStream();
+                byte[] buffer = new byte[BUFFER_SIZE];
+
                 while (isSending && !Thread.interrupted()) {
                     int read = recorder.read(buffer, 0, buffer.length);
                     if (read > 0) {
-                        final byte[] data = Arrays.copyOf(buffer, read);
-                        try {
-                            URL url = new URL(SERVER + "/send?room=" + currentRoom);
-                            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                            conn.setRequestMethod("POST");
-                            conn.setDoOutput(true);
-                            conn.setConnectTimeout(2000);
-                            conn.setReadTimeout(2000);
-                            conn.getOutputStream().write(data);
-                            conn.getOutputStream().flush();
-                            conn.getResponseCode();
-                            conn.disconnect();
-                        } catch (Exception ignored) {}
+                        accumulator.write(buffer, 0, read);
+
+                        if (accumulator.size() >= SEND_CHUNK) {
+                            final byte[] data = accumulator.toByteArray();
+                            accumulator.reset();
+                            try {
+                                // ── BUG #1 CORRIGÉ : on passe sender= ──────────
+                                URL url = new URL(SERVER + "/send?room=" + currentRoom
+                                        + "&sender=" + URLEncoder.encode(username, "UTF-8"));
+                                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                                conn.setRequestMethod("POST");
+                                conn.setDoOutput(true);
+                                conn.setConnectTimeout(3000);
+                                conn.setReadTimeout(3000);
+                                conn.getOutputStream().write(data);
+                                conn.getOutputStream().flush();
+                                conn.getResponseCode(); // attend la réponse du serveur
+                                conn.disconnect();
+                            } catch (Exception ignored) {}
+                        }
                     }
                 }
+
             } catch (Exception e) {
                 mainHandler.post(() -> updateStatus("❌ Micro: " + e.getMessage()));
             } finally {
@@ -363,13 +398,15 @@ public class MainActivity extends AppCompatActivity {
         sendThread.start();
     }
 
-    // ========== ENVOI LOCAL ==========
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ENVOI LOCAL (WiFi / WiFi Direct) — inchangé
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private void startSendingLocal() {
         sendThread = new Thread(() -> {
             String targetIp = currentMode.equals("WIFI") ?
-                etTargetIp.getText().toString().trim() :
-                etDirectIp.getText().toString().trim();
+                    etTargetIp.getText().toString().trim() :
+                    etDirectIp.getText().toString().trim();
 
             if (targetIp.isEmpty()) {
                 mainHandler.post(() -> updateStatus("❌ Entrez l'IP !"));
@@ -380,8 +417,8 @@ public class MainActivity extends AppCompatActivity {
             AudioRecord recorder = null;
             try {
                 recorder = new AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    SAMPLE_RATE, CHANNEL_IN, ENCODING, BUFFER_SIZE
+                        MediaRecorder.AudioSource.MIC,
+                        SAMPLE_RATE, CHANNEL_IN, ENCODING, BUFFER_SIZE
                 );
                 recorder.startRecording();
                 audioRecord = recorder;
@@ -421,7 +458,9 @@ public class MainActivity extends AppCompatActivity {
         sendThread.start();
     }
 
-    // ========== MEMBRES ==========
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MEMBRES
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private void startMembersRefresh() {
         if (membersTimer != null) membersTimer.cancel();
@@ -433,19 +472,22 @@ public class MainActivity extends AppCompatActivity {
                     URL url = new URL(SERVER + "/members?room=" + currentRoom);
                     HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                     conn.setConnectTimeout(3000);
+                    conn.setReadTimeout(3000);
                     BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
                     String resp = br.readLine();
                     conn.disconnect();
                     String count = resp.split("\"count\":")[1].replace("}", "").trim();
                     String m = resp.split("\"members\":")[1].split(",\"count\"")[0]
-                        .replace("[","").replace("]","").replace("\"","");
+                            .replace("[", "").replace("]", "").replace("\"", "");
                     mainHandler.post(() -> tvMembers.setText("👥 " + count + " : " + m));
                 } catch (Exception e) {}
             }
         }, 0, 3000);
     }
 
-    // ========== SERVEUR LOCAL ==========
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SERVEUR LOCAL (réception WiFi / WiFi Direct)
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private void startReceiveServer() {
         serverThread = new Thread(() -> {
@@ -476,11 +518,10 @@ public class MainActivity extends AppCompatActivity {
                 tvPeers.setText("Connecté : " + client.getInetAddress().getHostAddress());
             });
 
-            // AudioTrack local séparé
             track = new AudioTrack(
-                AudioManager.STREAM_MUSIC,
-                SAMPLE_RATE, CHANNEL_OUT, ENCODING,
-                BUFFER_SIZE, AudioTrack.MODE_STREAM
+                    AudioManager.STREAM_MUSIC,
+                    SAMPLE_RATE, CHANNEL_OUT, ENCODING,
+                    BUFFER_SIZE, AudioTrack.MODE_STREAM
             );
             track.play();
 
@@ -490,7 +531,6 @@ public class MainActivity extends AppCompatActivity {
                 dis.readFully(buffer, 0, size);
                 track.write(buffer, 0, size);
             }
-
             mainHandler.post(() -> updateStatus("✅ Prêt"));
 
         } catch (Exception e) {
@@ -503,7 +543,9 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ========== UTILITAIRES ==========
+    // ═══════════════════════════════════════════════════════════════════════════
+    // UTILITAIRES
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private String getLocalIp() {
         try {
@@ -526,31 +568,31 @@ public class MainActivity extends AppCompatActivity {
 
     private void requestPermissions() {
         ActivityCompat.requestPermissions(this, new String[]{
-            Manifest.permission.RECORD_AUDIO,
-            Manifest.permission.INTERNET,
-            Manifest.permission.ACCESS_WIFI_STATE,
-            Manifest.permission.CHANGE_WIFI_STATE,
-            Manifest.permission.ACCESS_NETWORK_STATE,
-            Manifest.permission.ACCESS_FINE_LOCATION
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.INTERNET,
+                Manifest.permission.ACCESS_WIFI_STATE,
+                Manifest.permission.CHANGE_WIFI_STATE,
+                Manifest.permission.ACCESS_NETWORK_STATE,
+                Manifest.permission.ACCESS_FINE_LOCATION
         }, 1);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        isSending = false;
+        isSending   = false;
         isListening = false;
         if (membersTimer != null) membersTimer.cancel();
         if (listenThread != null) listenThread.interrupt();
-        if (sendThread != null) sendThread.interrupt();
+        if (sendThread   != null) sendThread.interrupt();
         releaseInternetAudioTrack();
         try {
             if (!currentRoom.isEmpty() && !username.isEmpty()) {
                 new Thread(() -> {
                     try {
                         new URL(SERVER + "/leave?room=" + currentRoom
-                            + "&user=" + URLEncoder.encode(username, "UTF-8"))
-                            .openConnection().getInputStream().close();
+                                + "&user=" + URLEncoder.encode(username, "UTF-8"))
+                                .openConnection().getInputStream().close();
                     } catch (Exception e) {}
                 }).start();
             }
