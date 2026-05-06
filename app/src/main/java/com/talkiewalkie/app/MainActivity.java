@@ -21,11 +21,11 @@ import java.util.*;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final int SAMPLE_RATE = 16000;
+    private static final int SAMPLE_RATE = 44100;
     private static final int CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO;
     private static final int CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO;
     private static final int ENCODING = AudioFormat.ENCODING_PCM_16BIT;
-    private static final int BUFFER_SIZE = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, ENCODING) * 2;
+    private static final int BUFFER_SIZE = AudioRecord.getMinBufferSize(44100, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT) * 2;
     private static final int PORT = 55555;
     private static final String SERVER = "https://talkie-walkie-production.up.railway.app";
 
@@ -35,11 +35,15 @@ public class MainActivity extends AppCompatActivity {
     private EditText etTargetIp, etDirectIp, etRoomCode, etUsername;
     private LinearLayout layoutWifi, layoutDirect, layoutInternet, layoutRoom;
 
+    // Audio séparé pour écoute internet et réception locale
     private AudioRecord audioRecord;
-    private AudioTrack audioTrack;
+    private AudioTrack internetAudioTrack;
+    private AudioTrack localAudioTrack;
+
     private boolean isSending = false;
     private boolean isListening = false;
     private boolean inRoom = false;
+
     private ServerSocket serverSocket;
     private Thread serverThread, listenThread, sendThread;
     private String currentMode = "WIFI";
@@ -115,7 +119,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setupButtons() {
-        // PARLER — indépendant de l'écoute
+        // PARLER
         btnPush.setOnTouchListener((v, event) -> {
             if (event.getAction() == MotionEvent.ACTION_DOWN) {
                 if (currentMode.equals("INTERNET") && !inRoom) {
@@ -131,7 +135,6 @@ public class MainActivity extends AppCompatActivity {
                     startSendingLocal();
                 }
             } else if (event.getAction() == MotionEvent.ACTION_UP) {
-                // Arrête seulement l'envoi — PAS l'écoute !
                 isSending = false;
                 btnPush.setText("🎙️ MAINTENIR POUR PARLER");
                 btnPush.setBackgroundColor(0xFF4CAF50);
@@ -140,7 +143,7 @@ public class MainActivity extends AppCompatActivity {
             return true;
         });
 
-        // ÉCOUTER — indépendant de l'envoi
+        // ÉCOUTER
         btnListen.setOnClickListener(v -> {
             if (!inRoom) {
                 updateStatus("❌ Rejoins une salle d'abord !");
@@ -156,11 +159,10 @@ public class MainActivity extends AppCompatActivity {
                 btnListen.setText("👂 ÉCOUTER");
                 btnListen.setBackgroundColor(0xFF2196F3);
                 stopListening();
-                updateStatus("✅ Prêt");
             }
         });
 
-        // CRÉER SALLE
+        // CRÉER
         btnCreate.setOnClickListener(v -> {
             username = etUsername.getText().toString().trim();
             if (username.isEmpty()) {
@@ -170,7 +172,7 @@ public class MainActivity extends AppCompatActivity {
             createRoom();
         });
 
-        // REJOINDRE SALLE
+        // REJOINDRE
         btnJoin.setOnClickListener(v -> {
             username = etUsername.getText().toString().trim();
             String room = etRoomCode.getText().toString().trim().toUpperCase();
@@ -197,11 +199,9 @@ public class MainActivity extends AppCompatActivity {
                 BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
                 String response = br.readLine();
                 conn.disconnect();
-
                 String room = response.split("\"room\":\"")[1].split("\"")[0];
                 currentRoom = room;
                 inRoom = true;
-
                 mainHandler.post(() -> {
                     tvRoom.setText("🏠 Code : " + room + "\n👆 Partage ce code !");
                     layoutRoom.setVisibility(View.VISIBLE);
@@ -211,9 +211,7 @@ public class MainActivity extends AppCompatActivity {
                     updateStatus("✅ Salle créée ! Appuie ÉCOUTER");
                     tvPeers.setText("Tu es le créateur");
                 });
-
                 startMembersRefresh();
-
             } catch (Exception e) {
                 mainHandler.post(() -> updateStatus("❌ Erreur: " + e.getMessage()));
             }
@@ -229,15 +227,12 @@ public class MainActivity extends AppCompatActivity {
                 conn.setConnectTimeout(5000);
                 int code = conn.getResponseCode();
                 conn.disconnect();
-
                 if (code == 404) {
                     mainHandler.post(() -> updateStatus("❌ Salle introuvable !"));
                     return;
                 }
-
                 currentRoom = room;
                 inRoom = true;
-
                 mainHandler.post(() -> {
                     tvRoom.setText("🏠 Salle : " + room);
                     layoutRoom.setVisibility(View.VISIBLE);
@@ -247,9 +242,7 @@ public class MainActivity extends AppCompatActivity {
                     updateStatus("✅ Connecté ! Appuie ÉCOUTER");
                     tvPeers.setText("Membre de la salle");
                 });
-
                 startMembersRefresh();
-
             } catch (Exception e) {
                 mainHandler.post(() -> updateStatus("❌ " + e.getMessage()));
             }
@@ -259,50 +252,69 @@ public class MainActivity extends AppCompatActivity {
     // ========== ÉCOUTE INTERNET ==========
 
     private void startListeningInternet() {
-    listenThread = new Thread(() -> {
-        try {
-            audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
-                SAMPLE_RATE, CHANNEL_OUT, ENCODING,
-                BUFFER_SIZE * 4, AudioTrack.MODE_STREAM);
-            audioTrack.play();
-            mainHandler.post(() -> updateStatus("👂 Écoute en cours..."));
+        listenThread = new Thread(() -> {
+            try {
+                // AudioTrack séparé pour internet
+                internetAudioTrack = new AudioTrack(
+                    AudioManager.STREAM_MUSIC,
+                    SAMPLE_RATE, CHANNEL_OUT, ENCODING,
+                    BUFFER_SIZE * 4, AudioTrack.MODE_STREAM
+                );
+                internetAudioTrack.play();
+                mainHandler.post(() -> updateStatus("👂 Écoute en cours..."));
 
-            while (isListening && !Thread.interrupted()) {
-                try {
-                    URL url = new URL(SERVER + "/poll?room=" + currentRoom);
-                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                    conn.setConnectTimeout(2000);
-                    conn.setReadTimeout(2000);
-                    int code = conn.getResponseCode();
-                    if (code == 200) {
-                        byte[] data = conn.getInputStream().readAllBytes();
-                        if (data.length > 0) {
-                            audioTrack.write(data, 0, data.length);
+                while (isListening && !Thread.interrupted()) {
+                    try {
+                        URL url = new URL(SERVER + "/poll?room=" + currentRoom);
+                        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                        conn.setConnectTimeout(2000);
+                        conn.setReadTimeout(2000);
+                        int code = conn.getResponseCode();
+                        if (code == 200) {
+                            InputStream in = conn.getInputStream();
+                            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                            byte[] tmp = new byte[1024];
+                            int r;
+                            while ((r = in.read(tmp)) != -1) {
+                                bos.write(tmp, 0, r);
+                            }
+                            byte[] data = bos.toByteArray();
+                            if (data.length > 0 && internetAudioTrack != null) {
+                                internetAudioTrack.write(data, 0, data.length);
+                            }
+                            in.close();
                         }
+                        conn.disconnect();
+                    } catch (Exception e) {
+                        try { Thread.sleep(50); } catch (Exception ignored) {}
                     }
-                    conn.disconnect();
-                } catch (Exception e) {
-                    try { Thread.sleep(50); } catch (Exception ignored) {}
                 }
+
+            } catch (Exception e) {
+                mainHandler.post(() -> updateStatus("❌ Écoute: " + e.getMessage()));
+            } finally {
+                isListening = false;
+                releaseInternetAudioTrack();
             }
-        } catch (Exception e) {
-            mainHandler.post(() -> updateStatus("❌ " + e.getMessage()));
-        } finally {
-            isListening = false;
-            if (audioTrack != null) {
-                try { audioTrack.stop(); audioTrack.release(); } catch (Exception e) {}
-            }
-        }
-    });
-    listenThread.setDaemon(true);
-    listenThread.start();
+        });
+        listenThread.setDaemon(true);
+        listenThread.start();
     }
 
     private void stopListening() {
         isListening = false;
         if (listenThread != null) listenThread.interrupt();
-        if (audioTrack != null) {
-            try { audioTrack.stop(); audioTrack.release(); } catch (Exception e) {}
+        releaseInternetAudioTrack();
+        updateStatus("✅ Prêt");
+    }
+
+    private void releaseInternetAudioTrack() {
+        if (internetAudioTrack != null) {
+            try {
+                internetAudioTrack.stop();
+                internetAudioTrack.release();
+                internetAudioTrack = null;
+            } catch (Exception e) {}
         }
     }
 
@@ -312,16 +324,15 @@ public class MainActivity extends AppCompatActivity {
         sendThread = new Thread(() -> {
             AudioRecord recorder = null;
             try {
-                recorder = new AudioRecord(MediaRecorder.AudioSource.MIC,
-                    SAMPLE_RATE, CHANNEL_IN, ENCODING, BUFFER_SIZE);
+                recorder = new AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    SAMPLE_RATE, CHANNEL_IN, ENCODING, BUFFER_SIZE
+                );
                 recorder.startRecording();
                 audioRecord = recorder;
 
                 byte[] buffer = new byte[2048];
-
-                // Envoie audio tant que le bouton est pressé
-                // N'affecte PAS isListening !
-                while (isSending) {
+                while (isSending && !Thread.interrupted()) {
                     int read = recorder.read(buffer, 0, buffer.length);
                     if (read > 0) {
                         final byte[] data = Arrays.copyOf(buffer, read);
@@ -336,18 +347,16 @@ public class MainActivity extends AppCompatActivity {
                             conn.getOutputStream().flush();
                             conn.getResponseCode();
                             conn.disconnect();
-                        } catch (Exception e) {
-                            // Continue même si un envoi échoue
-                        }
+                        } catch (Exception ignored) {}
                     }
                 }
-
             } catch (Exception e) {
                 mainHandler.post(() -> updateStatus("❌ Micro: " + e.getMessage()));
             } finally {
                 if (recorder != null) {
                     try { recorder.stop(); recorder.release(); } catch (Exception e) {}
                 }
+                audioRecord = null;
             }
         });
         sendThread.setDaemon(true);
@@ -368,9 +377,12 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
 
+            AudioRecord recorder = null;
             try {
-                AudioRecord recorder = new AudioRecord(MediaRecorder.AudioSource.MIC,
-                    SAMPLE_RATE, CHANNEL_IN, ENCODING, BUFFER_SIZE);
+                recorder = new AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    SAMPLE_RATE, CHANNEL_IN, ENCODING, BUFFER_SIZE
+                );
                 recorder.startRecording();
                 audioRecord = recorder;
 
@@ -393,12 +405,15 @@ public class MainActivity extends AppCompatActivity {
 
                 dos.writeInt(-1);
                 socket.close();
-                recorder.stop();
-                recorder.release();
                 mainHandler.post(() -> updateStatus("✅ Prêt"));
 
             } catch (Exception e) {
                 mainHandler.post(() -> updateStatus("❌ " + e.getMessage()));
+            } finally {
+                if (recorder != null) {
+                    try { recorder.stop(); recorder.release(); } catch (Exception e) {}
+                }
+                audioRecord = null;
                 isSending = false;
             }
         });
@@ -424,7 +439,7 @@ public class MainActivity extends AppCompatActivity {
                     String count = resp.split("\"count\":")[1].replace("}", "").trim();
                     String m = resp.split("\"members\":")[1].split(",\"count\"")[0]
                         .replace("[","").replace("]","").replace("\"","");
-                    mainHandler.post(() -> tvMembers.setText("👥 " + count + " membre(s) : " + m));
+                    mainHandler.post(() -> tvMembers.setText("👥 " + count + " : " + m));
                 } catch (Exception e) {}
             }
         }, 0, 3000);
@@ -452,6 +467,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void handleIncoming(Socket client) {
+        AudioTrack track = null;
         try {
             DataInputStream dis = new DataInputStream(client.getInputStream());
             dis.readUTF();
@@ -460,24 +476,30 @@ public class MainActivity extends AppCompatActivity {
                 tvPeers.setText("Connecté : " + client.getInetAddress().getHostAddress());
             });
 
-            audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
-                SAMPLE_RATE, CHANNEL_OUT, ENCODING, BUFFER_SIZE, AudioTrack.MODE_STREAM);
-            audioTrack.play();
+            // AudioTrack local séparé
+            track = new AudioTrack(
+                AudioManager.STREAM_MUSIC,
+                SAMPLE_RATE, CHANNEL_OUT, ENCODING,
+                BUFFER_SIZE, AudioTrack.MODE_STREAM
+            );
+            track.play();
 
             byte[] buffer = new byte[BUFFER_SIZE];
             int size;
             while ((size = dis.readInt()) != -1) {
                 dis.readFully(buffer, 0, size);
-                audioTrack.write(buffer, 0, size);
+                track.write(buffer, 0, size);
             }
 
-            audioTrack.stop();
-            audioTrack.release();
-            client.close();
             mainHandler.post(() -> updateStatus("✅ Prêt"));
 
         } catch (Exception e) {
             mainHandler.post(() -> updateStatus("Réception: " + e.getMessage()));
+        } finally {
+            if (track != null) {
+                try { track.stop(); track.release(); } catch (Exception e) {}
+            }
+            try { client.close(); } catch (Exception e) {}
         }
     }
 
@@ -521,13 +543,14 @@ public class MainActivity extends AppCompatActivity {
         if (membersTimer != null) membersTimer.cancel();
         if (listenThread != null) listenThread.interrupt();
         if (sendThread != null) sendThread.interrupt();
+        releaseInternetAudioTrack();
         try {
             if (!currentRoom.isEmpty() && !username.isEmpty()) {
                 new Thread(() -> {
                     try {
                         new URL(SERVER + "/leave?room=" + currentRoom
                             + "&user=" + URLEncoder.encode(username, "UTF-8"))
-                            .openConnection().getInputStream();
+                            .openConnection().getInputStream().close();
                     } catch (Exception e) {}
                 }).start();
             }
