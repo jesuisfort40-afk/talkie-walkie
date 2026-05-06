@@ -6,6 +6,6 @@ COPY server/Server.java .
 
 RUN javac Server.java
 
-EXPOSE 55555
+EXPOSE 8080
 
 CMD ["java", "Server"]
