@@ -262,7 +262,8 @@ public class MainActivity extends AppCompatActivity {
     listenThread = new Thread(() -> {
         try {
             audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
-                SAMPLE_RATE, CHANNEL_OUT, ENCODING, BUFFER_SIZE, AudioTrack.MODE_STREAM);
+                SAMPLE_RATE, CHANNEL_OUT, ENCODING,
+                BUFFER_SIZE * 4, AudioTrack.MODE_STREAM);
             audioTrack.play();
             mainHandler.post(() -> updateStatus("👂 Écoute en cours..."));
 
@@ -270,33 +271,22 @@ public class MainActivity extends AppCompatActivity {
                 try {
                     URL url = new URL(SERVER + "/poll?room=" + currentRoom);
                     HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                    conn.setConnectTimeout(3000);
-                    conn.setReadTimeout(3000);
+                    conn.setConnectTimeout(2000);
+                    conn.setReadTimeout(2000);
                     int code = conn.getResponseCode();
-
                     if (code == 200) {
-                        // Audio disponible !
-                        InputStream in = conn.getInputStream();
-                        byte[] buffer = new byte[BUFFER_SIZE];
-                        int read = in.read(buffer);
-                        if (read > 0) {
-                            audioTrack.write(buffer, 0, read);
+                        byte[] data = conn.getInputStream().readAllBytes();
+                        if (data.length > 0) {
+                            audioTrack.write(data, 0, data.length);
                         }
-                        in.close();
                     }
-                    // 204 = pas d'audio, on reessaie
                     conn.disconnect();
-
                 } catch (Exception e) {
-                    // Continue même si une requête échoue
-                    try { Thread.sleep(100); } catch (Exception ignored) {}
+                    try { Thread.sleep(50); } catch (Exception ignored) {}
                 }
             }
-
         } catch (Exception e) {
-            if (isListening) {
-                mainHandler.post(() -> updateStatus("❌ Écoute: " + e.getMessage()));
-            }
+            mainHandler.post(() -> updateStatus("❌ " + e.getMessage()));
         } finally {
             isListening = false;
             if (audioTrack != null) {
@@ -306,7 +296,7 @@ public class MainActivity extends AppCompatActivity {
     });
     listenThread.setDaemon(true);
     listenThread.start();
-}
+    }
 
     private void stopListening() {
         isListening = false;
@@ -327,7 +317,7 @@ public class MainActivity extends AppCompatActivity {
                 recorder.startRecording();
                 audioRecord = recorder;
 
-                byte[] buffer = new byte[BUFFER_SIZE];
+                byte[] buffer = new byte[2048];
 
                 // Envoie audio tant que le bouton est pressé
                 // N'affecte PAS isListening !
